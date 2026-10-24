@@ -1100,6 +1100,7 @@ RenderBar(grp) {
     g.BackColor := "1B1B1B"
     g.MarginX := 0
     g.MarginY := 0
+    g.OnEvent("ContextMenu", (*) => Ungroup(grp))
     x := 3
     if (grp.offset > 0) {
         b1 := g.Add("Text", "x" x " y4 w18 h18 Center cE0E0E0", "<")
@@ -1130,12 +1131,44 @@ RenderBar(grp) {
 ActivateMember(grp, idx, *) {
     if (idx > grp.members.Length)
         return
+    if GetKeyState("Ctrl", "P") {
+        ; ctrl+click a tab = take that window OUT of the group
+        RemoveMember(grp, idx)
+        return
+    }
     prev := grp.active
     grp.active := idx
     if (gGroupStyle = "minimize" && prev != idx && prev >= 1 && prev <= grp.members.Length)
         WinMinimize(grp.members[prev])
     WinActivate(grp.members[idx])
     grp.needRender := true
+}
+
+RemoveMember(grp, idx) {
+    global
+    h := grp.members[idx]
+    grp.members.RemoveAt(idx)
+    if (grp.active >= idx)
+        grp.active := Max(1, grp.active - 1)
+    Log("group member removed: " h " (" grp.members.Length " left)")
+    if (grp.members.Length < 2) {
+        Ungroup(grp)
+        return
+    }
+    grp.needRender := true
+}
+
+Ungroup(grp) {
+    global
+    for i, g in gGroups
+        if (g = grp) {
+            gGroups.RemoveAt(i)
+            break
+        }
+    try grp.gui.Destroy()
+    grp.gui := 0
+    grp.shown := false
+    Log("group ungrouped — windows stay where they are")
 }
 
 MaintainGroups() {
