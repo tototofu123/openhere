@@ -51,8 +51,19 @@ Two more hotkeys:
 
 | Hotkey | Action |
 |---|---|
+| **Ctrl+Alt+O** | Enable/disable the whole app (same as the tray toggle) |
 | **Ctrl+Alt+S** | Snap the active window into the next free cell of its monitor |
 | **Ctrl+Alt+T** | Flush drifted grid windows on the current monitor into place |
+
+### Protected monitors (v0.4)
+
+New windows are never snapped onto a monitor that is already fully occupied:
+
+- a **fullscreen or maximized** window covering ~95%+ of the monitor protects it;
+- a **media player** (VLC, mpv, Media Player, Spotify…) covering 70%+ of a monitor protects it — your video never gets buried;
+- if **every** monitor is protected, new windows are simply left where Windows puts them.
+
+Extra media process names can be added under `[media]` in the ini. Browsers playing windowed video can't be detected (no reliable signal) — fullscreen video in a browser is covered by the fullscreen rule.
 
 Hotkeys are configurable in `[grouping]` of the ini (`^` = Ctrl, `!` = Alt, `+` = Shift).
 

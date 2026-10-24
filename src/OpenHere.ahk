@@ -68,6 +68,8 @@ gGroupSel := []         ; selection order
 gGroupOverlays := Map() ; hwnd -> highlight gui
 gGroupBanner := 0
 gGroupHotkey := "^!g"
+gEnabledHotkey := "^!o"
+gMediaProcs := Map()
 gSnapHotkey := "^!s"
 gTidyHotkey := "^!t"
 gGroupStyle := "overlap" 
@@ -96,6 +98,19 @@ placement=snap
 ; set to 1 to write a log of every decision next to this file
 log=0
 
+[grouping]
+; hotkeys (AHK syntax): ^ = Ctrl, ! = Alt, + = Shift
+; group mode: press once, click windows, press again to confirm
+hotkey=^!g
+; enable/disable the whole app
+enabled_hotkey=^!o
+
+[media]
+; extra process names treated as media players (comma-separated):
+; a monitor where one covers 70%+ is protected from new windows
+; (fullscreen coverage protects any monitor regardless)
+processes=
+
 [rules]
 ; per-app rules win over the global behavior.
 ;   never        = this app keeps Windows' own placement memory
@@ -119,6 +134,16 @@ LoadConfig() {
     gDebug := IniRead(path, "debug", "log", "0") = "1"
     gLogPath := A_ScriptDir "\openhere.log"
     gGroupHotkey := IniRead(path, "grouping", "hotkey", "^!g")
+    gEnabledHotkey := IniRead(path, "grouping", "enabled_hotkey", "^!o")
+    gMediaProcs := Map()
+    for mp in StrSplit(IniRead(path, "media", "processes", ""), ",", " \t") {
+        mp := StrLower(Trim(mp))
+        if (mp != "")
+            gMediaProcs[mp] := true
+    }
+    for mp in ["vlc.exe", "mpv.exe", "potplayermini64.exe", "potplayermini.exe",
+               "wmplayer.exe", "mpc-hc64.exe", "mpc-hc.exe", "spotify.exe", "itunes.exe"]
+        gMediaProcs[mp] := true
     gSnapHotkey := IniRead(path, "grouping", "snap_hotkey", "^!s")
     gTidyHotkey := IniRead(path, "grouping", "tidy_hotkey", "^!t")
     gGroupStyle := IniRead(path, "grouping", "mode", "overlap")
@@ -407,6 +432,63 @@ TidyGrid(targetMon) {
 }
 
 ; ------------------------------------------------------------
+; Protected monitors: never snap new windows onto a monitor that is
+; already fully occupied — a fullscreen/maximized window (covers >=95%
+; of the FULL rect, taskbar included) or a media player covering >=70%.
+; If every monitor is protected, new windows are left where Windows
+; puts them.
+; ------------------------------------------------------------
+MonitorProtected(mon, excludeHwnd) {
+    global
+    mi := Buffer(40, 0)
+    NumPut("UInt", 40, mi, 0)
+    DllCall("GetMonitorInfoW", "ptr", mon, "ptr", mi, "ptr")
+    l := NumGet(mi, 4, "Int"), t := NumGet(mi, 8, "Int")
+    r := NumGet(mi, 12, "Int"), b := NumGet(mi, 16, "Int")
+    fullArea := (r - l) * (b - t)
+
+    for hwnd in WinGetList() {
+        if (hwnd = excludeHwnd)
+            continue
+        if !DllCall("IsWindowVisible", "ptr", hwnd, "int")
+            continue
+        if (WinGetMinMax(hwnd) = -1)
+            continue
+        cloaked := 0
+        DllCall("dwmapi\DwmGetWindowAttribute", "ptr", hwnd, "uint", DWMWA_CLOAKED,
+                "uint*", &cloaked, "uint", 4, "int")
+        if (cloaked != 0)
+            continue
+        exStyle := DllCall("GetWindowLongPtrW", "ptr", hwnd, "int", GWL_EXSTYLE, "ptr")
+        if (exStyle & WS_EX_TOOLWINDOW)
+            continue
+        cls := WinGetClass(hwnd)
+        shellCls := false
+        for ig in SHELL_CLASSES
+            if (StrCompare(cls, ig, false) = 0) {
+                shellCls := true
+                break
+            }
+        if shellCls
+            continue
+        if (MonitorFromHwnd(hwnd) != mon)
+            continue
+        rc := WindowRect(hwnd)
+        ol := Max(rc.left, l), ot := Max(rc.top, t)
+        orr := Min(rc.right, r), ob := Min(rc.bottom, b)
+        if (orr <= ol || ob <= ot)
+            continue
+        cover := (orr - ol) * (ob - ot) / fullArea
+        if (cover >= 0.95)
+            return true
+        proc := StrLower(WinGetProcessName(hwnd))
+        if (gMediaProcs.Has(proc) && cover >= 0.70)
+            return true
+    }
+    return false
+}
+
+; ------------------------------------------------------------
 ; Placement
 ; ------------------------------------------------------------
 MoveToMonitor(hwnd, targetMon, isRetry := false) {
@@ -630,6 +712,10 @@ HandleWindow(hwnd, isRetry := false) {
     if (MonitorFromHwnd(hwnd) = targetMon && gPlacement != "snap")
         return
 
+    if MonitorProtected(targetMon, hwnd) {
+        Log("target monitor protected (fullscreen/media) — " hwnd " left alone")
+        return
+    }
     Log("new window " hwnd " (" proc " / " WinGetClass(hwnd) ") rule=" rule)
     desired := MoveToMonitor(hwnd, targetMon, isRetry)
     if (desired != "none") {
@@ -844,6 +930,11 @@ RegisterHotkeys(attempt := 5) {
     catch Error as err {
         ok := false
         Log("hotkey '" gTidyHotkey "' not registered: " err.Message)
+    }
+    try Hotkey(gEnabledHotkey, MenuToggleEnabled)
+    catch Error as err {
+        ok := false
+        Log("hotkey '" gEnabledHotkey "' not registered: " err.Message)
     }
     if (!ok && attempt > 0) {
         ; a just-killed previous instance can still hold the hotkeys
@@ -1096,6 +1187,10 @@ SnapActiveWindow(hkName := "") {
     if (StrLower(WinGetProcessName(hwnd)) = StrLower(WinGetProcessName(A_ScriptHwnd)))
         return
     mon := MonitorFromHwnd(hwnd)
+    if MonitorProtected(mon, hwnd) {
+        Log("snap-active: monitor " Hex(mon) " is protected (fullscreen/media)")
+        return
+    }
     wa := MonitorWorkArea(mon)
     occ := CollectOccupied(mon, hwnd, wa)
     grid := occ.Length > 0 ? DetectGrid(occ, wa) : ""
