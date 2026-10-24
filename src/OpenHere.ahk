@@ -701,7 +701,7 @@ RefreshTray() {
 ; ---- tray icon: the logo; a left-click is the enable/disable toggle
 TrayIconPath(on) {
     name := on ? "tray-on.ico" : "tray-off.ico"
-    for c in [A_ScriptDir "ssets\" name, A_ScriptDir "\..ssets\" name]
+    for c in [A_ScriptDir "\assets\" name, A_ScriptDir "\..\assets\" name]
         if FileExist(c)
             return c
     return ""
@@ -775,7 +775,12 @@ Persistent()   ; v2: tray-only scripts exit when startup ends unless marked pers
 SetTimer(Watchdog, 400)   ; drains the deferred re-check / re-assert queue + group upkeep
 RegisterHotkeys()
 OnMessage(0x404, OnTrayIconMsg)   ; tray icon left-click = toggle
-CreateDesktopShortcut()
+try WriteToggleHelper()
+catch Error as err
+    Log("toggle helper failed: " err.Message)
+try EnsureDesktopShortcut()
+catch Error as err
+    Log("desktop shortcut failed: " err.Message)
 gHookCallback := CallbackCreate(OnWinShow)
 gHookHandle := DllCall("SetWinEventHook",
     "uint", EVENT_OBJECT_SHOW, "uint", EVENT_OBJECT_SHOW,
@@ -1114,31 +1119,67 @@ DesktopShortcutPath() {
 
 DesktopIconPath(on) {
     name := on ? "desktop-on.ico" : "desktop-off.ico"
-    for c in [A_ScriptDir "\assets\" name, A_ScriptDir "\..\" name, A_ScriptDir "\..\assets\" name]
+    for c in [A_ScriptDir "\assets\" name, A_ScriptDir "\..\assets\" name]
         if FileExist(c)
             return c
     return ""
 }
 
-CreateDesktopShortcut() {
+EnsureDesktopShortcut() {
     global
     lnk := DesktopShortcutPath()
-    if FileExist(lnk)
-        return
     try {
+        existed := FileExist(lnk) ? true : false
         ws := ComObject("WScript.Shell")
         sc := ws.CreateShortcut(lnk)
-        sc.TargetPath := A_AhkPath
-        sc.Arguments := '"' A_ScriptFullPath '"'
-        sc.WorkingDirectory := A_ScriptDir
+        changed := false
+        if (sc.TargetPath != A_AhkPath) {
+            sc.TargetPath := A_AhkPath
+            changed := true
+        }
+        wantArgs := '"' A_ScriptDir "\toggle.ahk" '"'
+        if (sc.Arguments != wantArgs) {
+            sc.Arguments := wantArgs
+            changed := true
+        }
+        if (sc.WorkingDirectory != A_ScriptDir) {
+            sc.WorkingDirectory := A_ScriptDir
+            changed := true
+        }
         icon := DesktopIconPath(gEnabled)
-        if (icon != "")
+        if (icon != "" && !InStr(sc.IconLocation, icon)) {
             sc.IconLocation := icon
-        sc.Description := "OpenHere — apps open where you are"
-        sc.Save()
-        Log("desktop shortcut created at " lnk)
+            changed := true
+        }
+        if (changed) {
+            sc.Save()
+            Log("desktop shortcut " (existed ? "updated" : "created") " (double-click = toggle)")
+        }
     } catch Error as err
         Log("desktop shortcut failed: " err.Message)
+}
+
+; the double-click helper: toggles the running OpenHere, starts it if
+; it isn't running; OpenHere (re)writes it at startup with its own path
+WriteToggleHelper() {
+    global
+    helper := A_ScriptDir "\toggle.ahk"
+    q := Chr(34)   ; the quote character — no escaped-quote spaghetti
+    lines := []
+    lines.Push("#Requires AutoHotkey v2.0")
+    lines.Push("#SingleInstance Off")
+    lines.Push("DetectHiddenWindows true")
+    lines.Push("if WinExist(" q A_ScriptName " ahk_class AutoHotkey" q ")")
+    lines.Push("    PostMessage 0x404, 0, 0x202")
+    lines.Push("else")
+    lines.Push("    Run " q A_ScriptFullPath q)
+    content := ""
+    for sLine in lines
+        content .= sLine "`n"
+    f := FileOpen(helper, "w")
+    f.Write(content)
+    f.Close()
+    Log("toggle helper written")
 }
 
 UpdateDesktopShortcutIcon() {
