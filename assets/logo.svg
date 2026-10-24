@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- OpenHere — the window opens where the cursor is -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#1B1F27"/>
+  <!-- monitor -->
+  <rect x="10" y="12" width="44" height="30" rx="4" fill="none" stroke="#9CA3AF" stroke-width="3"/>
+  <rect x="15" y="17" width="34" height="20" rx="2" fill="#2A3140"/>
+  <!-- stand -->
+  <rect x="28" y="42" width="8" height="4" fill="#9CA3AF"/>
+  <rect x="22" y="46" width="20" height="3" rx="1.5" fill="#9CA3AF"/>
+  <!-- cursor arrow, landing on the screen -->
+  <g transform="translate(30,20)">
+    <path d="M0 0 L0 17 L4.4 12.8 L7.6 19.4 L10.8 17.8 L7.6 11.4 L13.6 11.2 Z"
+          fill="#4FC1FF" stroke="#FFFFFF" stroke-width="1.6" stroke-linejoin="round"/>
+  </g>
+</svg>

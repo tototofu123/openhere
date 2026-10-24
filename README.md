@@ -39,6 +39,8 @@ Requirements: Windows 10/11. No admin rights. Nothing is installed and no system
 - **Fights back gracefully** — apps that restore their own saved geometry on startup (browsers, Office) get re-asserted a few times, then OpenHere concedes and you can pin them with a rule.
 - **Respects the shell** — taskbar, Start, search, Action Center, IME and XAML content-island ghosts are never touched.
 
+The tray icon is OpenHere itself: **left-click it to pause/resume** (the cursor glyph lights up cyan when on, dims when off), right-click for the full menu.
+
 ## Grouping (v0.3)
 
 Press **Ctrl+Alt+G** to enter grouping mode: click the windows you want to group (a translucent highlight marks the selection, click again to unselect), then press **Ctrl+Alt+G** again to confirm. The members stack into one cell — unsnapped ones get snapped by construction — with a floating **tab bar** across the top of the cell: click a tab to switch windows, arrows appear when there are more tabs than fit (10+ on a half-cell, titles truncated), and the bar is only visible while a member of the group is the foreground window. Groups dissolve automatically when their last window closes. Esc cancels grouping mode.

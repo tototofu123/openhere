@@ -664,7 +664,6 @@ OnWinShow(hHook, event, hwnd, idObject, idChild, eventThread, eventTime) {
 ; ------------------------------------------------------------
 BuildTray() {
     global
-    TraySetIcon("shell32.dll", 15)   ; little monitor
     A_IconTip := "OpenHere — apps open where you are"
 
     A_TrayMenu.Delete()
@@ -695,6 +694,30 @@ RefreshTray() {
         A_TrayMenu.Check("Snap into empty space")
     else
         A_TrayMenu.Uncheck("Snap into empty space")
+    UpdateTrayIcon()
+}
+
+; ---- tray icon: the logo; a left-click is the enable/disable toggle
+TrayIconPath(on) {
+    name := on ? "tray-on.ico" : "tray-off.ico"
+    for c in [A_ScriptDir "ssets\" name, A_ScriptDir "\..ssets\" name]
+        if FileExist(c)
+            return c
+    return ""
+}
+
+UpdateTrayIcon() {
+    global
+    p := TrayIconPath(gEnabled)
+    if (p != "")
+        TraySetIcon(p)
+    A_IconTip := gEnabled ? "OpenHere — ON (left-click to pause)" : "OpenHere — OFF (left-click to resume)"
+}
+
+OnTrayIconMsg(wParam, lParam, msg, hwnd) {
+    global
+    if (lParam = 0x202)          ; WM_LBUTTONUP on the tray icon
+        MenuToggleEnabled()
 }
 
 MenuToggleSnap(*) {
@@ -750,6 +773,7 @@ CoordMode "Mouse", "Screen"   ; v2 defaults to Client-relative — placement nee
 Persistent()   ; v2: tray-only scripts exit when startup ends unless marked persistent
 SetTimer(Watchdog, 400)   ; drains the deferred re-check / re-assert queue + group upkeep
 RegisterHotkeys()
+OnMessage(0x404, OnTrayIconMsg)   ; tray icon left-click = toggle
 gHookCallback := CallbackCreate(OnWinShow)
 gHookHandle := DllCall("SetWinEventHook",
     "uint", EVENT_OBJECT_SHOW, "uint", EVENT_OBJECT_SHOW,
@@ -851,6 +875,7 @@ ClearOverlays() {
 
 GroupModeClick() {
     global
+    Log("group-click ignored (mode off)")
     if !gGroupMode
         return
     MouseGetPos ,, &w
@@ -1075,3 +1100,4 @@ TidyNow(hkName := "") {
     TidyGrid(mon)
     Log("tidy-now on monitor " Hex(mon))
 }
+
