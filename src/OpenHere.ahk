@@ -59,6 +59,7 @@ gPlacement := "center"
 gDebug := false
 gLogPath := ""
 gHookCallback := 0      ; keep referenced or the hook dies
+gPending := []          ; deferred re-checks / re-asserts (watchdog queue)
 gHookHandle := 0
 
 ; ------------------------------------------------------------
@@ -74,7 +75,11 @@ WriteDefaultConfig(path) {
 "[general]
 ; master switch, mirrored by the tray icon checkbox
 enabled=1
-; placement=center    ; center | remember_relative (v0.1: center)
+; placement: snap   = fill the next free slot on the monitor
+;                    (half -> other half, third -> middle third,
+;                     quarter -> next quarter, half+quarter -> last quarter)
+;            center = always center new windows (v0.1 behavior)
+placement=snap
 
 [debug]
 ; set to 1 to write a log of every decision next to this file
@@ -99,7 +104,7 @@ LoadConfig() {
         WriteDefaultConfig(path)
 
     gEnabled := IniRead(path, "general", "enabled", "1") = "1"
-    gPlacement := IniRead(path, "general", "placement", "center")
+    gPlacement := IniRead(path, "general", "placement", "snap")
     gDebug := IniRead(path, "debug", "log", "0") = "1"
     gLogPath := A_ScriptDir "\openhere.log"
 
@@ -219,7 +224,7 @@ IsManageableWindow(hwnd, isRetry := false) {
     if DllCall("GetWindowTextLengthW", "ptr", hwnd, "int") = 0 {
         if (isRetry)
             return false
-        SetTimer(() => HandleWindow(hwnd, true), -400)
+        QueueDeferred(hwnd, "retry")
         return false
     }
 
@@ -244,10 +249,114 @@ IsManageableWindow(hwnd, isRetry := false) {
 }
 
 ; ------------------------------------------------------------
+; Snap into empty space — know what's already on the monitor and
+; fill the next free slot instead of stacking on top of it.
+;
+;   one window on the left half  -> next fills the right half
+;   one window on the left third -> next fills the middle third
+;   window in the top-left 1/4   -> next top-right, then bottom-left
+;   half + quarter occupied      -> next fills the remaining quarter
+;   anything else                -> center, like before
+; ------------------------------------------------------------
+CollectOccupied(targetMon, excludeHwnd, wa) {
+    occ := []
+    waW := wa.right - wa.left
+    waH := wa.bottom - wa.top
+    for hwnd in WinGetList() {
+        if (hwnd = excludeHwnd)
+            continue
+        if !DllCall("IsWindowVisible", "ptr", hwnd, "int")
+            continue
+        if (WinGetMinMax(hwnd) = -1)               ; minimized
+            continue
+        exStyle := DllCall("GetWindowLongPtrW", "ptr", hwnd, "int", GWL_EXSTYLE, "ptr")
+        if (exStyle & WS_EX_TOOLWINDOW)
+            continue
+        cloaked := 0
+        DllCall("dwmapi\DwmGetWindowAttribute", "ptr", hwnd, "uint", DWMWA_CLOAKED,
+                "uint*", &cloaked, "uint", 4, "int")
+        if (cloaked != 0)
+            continue
+        cls := WinGetClass(hwnd)
+        if (SubStr(cls, 1, 13) = "Microsoft.UI." || SubStr(cls, 1, 11) = "Windows.UI.")
+            continue
+        shell := false
+        for ignore in SHELL_CLASSES
+            if (StrCompare(cls, ignore, false) = 0) {
+                shell := true
+                break
+            }
+        if shell
+            continue
+        if (MonitorFromHwnd(hwnd) != targetMon)
+            continue
+        rc := WindowRect(hwnd)
+        l := Max(rc.left, wa.left), t := Max(rc.top, wa.top)
+        r := Min(rc.right, wa.right), b := Min(rc.bottom, wa.bottom)
+        if (r - l < 40 || b - t < 40)
+            continue
+        if ((r - l) * (b - t) < 0.08 * waW * waH)  ; tiny widgets don't dictate layout
+            continue
+        occ.Push({l: l, t: t, r: r, b: b})
+    }
+    return occ
+}
+
+DetectGrid(occ, wa) {
+    waW := wa.right - wa.left
+    waH := wa.bottom - wa.top
+    anyShort := false
+    widest := 0
+    for w in occ {
+        fw := (w.r - w.l) / waW
+        fh := (w.b - w.t) / waH
+        if (fw < 0.26 || fw > 0.74)                ; not a column-shaped window
+            return ""
+        if (fh < 0.8)
+            anyShort := true
+        if (fw > widest)
+            widest := fw
+    }
+    if (anyShort)
+        return "2x2"                               ; quarter-shaped window present
+    if (widest <= 0.45)
+        return "cols3"                             ; third-shaped windows
+    return "cols2"                                 ; half-shaped windows
+}
+
+GridCells(grid, wa) {
+    l := wa.left, t := wa.top, r := wa.right, b := wa.bottom
+    midX := l + (r - l) // 2, midY := t + (b - t) // 2
+    x1 := l + (r - l) // 3, x2 := l + 2 * (r - l) // 3
+    if (grid = "cols2")
+        return [{l: l, t: t, r: midX, b: b}, {l: midX, t: t, r: r, b: b}]
+    if (grid = "cols3")
+        return [{l: l, t: t, r: x1, b: b}, {l: x1, t: t, r: x2, b: b}, {l: x2, t: t, r: r, b: b}]
+    ; 2x2 — reading order: top-left, top-right, bottom-left, bottom-right
+    return [{l: l, t: t, r: midX, b: midY}, {l: midX, t: t, r: r, b: midY},
+            {l: l, t: midY, r: midX, b: b}, {l: midX, t: midY, r: r, b: b}]
+}
+
+CellOccupied(cell, occ) {
+    cellArea := (cell.r - cell.l) * (cell.b - cell.t)
+    for w in occ {
+        ol := Max(w.l, cell.l), ot := Max(w.t, cell.t)
+        orr := Min(w.r, cell.r), ob := Min(w.b, cell.b)
+        if (orr > ol && ob > ot) {
+            cover := (orr - ol) * (ob - ot) / cellArea
+            if (cover >= 0.4)
+                return true
+        }
+    }
+    return false
+}
+
+; ------------------------------------------------------------
 ; Placement
 ; ------------------------------------------------------------
-MoveToMonitor(hwnd, targetMon) {
+MoveToMonitor(hwnd, targetMon, isRetry := false) {
     wa := MonitorWorkArea(targetMon)
+    Log("MoveToMonitor " hwnd " mon=" Hex(targetMon) " retry=" isRetry)
     waW := wa.right - wa.left
     waH := wa.bottom - wa.top
 
@@ -261,25 +370,67 @@ MoveToMonitor(hwnd, targetMon) {
         ; borderless fullscreen — cover the whole target monitor
         SetWindowPosRect(hwnd, wa.left, wa.top, waW, waH)
         Log("moved fullscreen " hwnd " -> monitor " Hex(targetMon))
-        return
+        return "none"
     }
 
     if (minmax = 1) {
-        ; maximized: restore, land it on the target monitor, re-maximize there
-        WinRestore(hwnd)
-        rc := WindowRect(hwnd)
-        winW := rc.right - rc.left
-        winH := rc.bottom - rc.top
-        x := wa.left + (waW - winW) // 2
-        y := wa.top + (waH - winH) // 2
-        SetWindowPosRect(hwnd, x, y, winW, winH)
-        DllCall("ShowWindow", "ptr", hwnd, "int", SW_MAXIMIZE, "int")
-        Log("re-maximized " hwnd " on monitor " Hex(targetMon))
-        return
+        ; maximized birth state
+        occ := CollectOccupied(targetMon, hwnd, wa)
+        grid := occ.Length > 0 ? DetectGrid(occ, wa) : ""
+        if (gPlacement = "snap")
+            Log("maximized newborn " hwnd ": occ=" occ.Length " grid=" (grid = "" ? "none" : grid))
+        if (gPlacement = "snap" && grid != "") {
+            for cell in GridCells(grid, wa) {
+                if !CellOccupied(cell, occ) {
+                    WinRestore(hwnd)
+                    SetWindowPosRect(hwnd, cell.l, cell.t, cell.r - cell.l, cell.b - cell.t)
+                    Log("snapped maximized " hwnd " into " grid " free cell")
+                    return {l: cell.l, t: cell.t, r: cell.r, b: cell.b}
+                }
+            }
+        }
+        if (gPlacement != "snap" || MonitorFromHwnd(hwnd) != targetMon) {
+            ; keep it maximized, but on the target monitor
+            WinRestore(hwnd)
+            rc := WindowRect(hwnd)
+            winW := rc.right - rc.left
+            winH := rc.bottom - rc.top
+            x := wa.left + (waW - winW) // 2
+            y := wa.top + (waH - winH) // 2
+            SetWindowPosRect(hwnd, x, y, winW, winH)
+            DllCall("ShowWindow", "ptr", hwnd, "int", SW_MAXIMIZE, "int")
+            Log("re-maximized " hwnd " on monitor " Hex(targetMon))
+            return ""
+        }
+        Log("left maximized on target (no grid among " occ.Length " windows)")
+        return ""
     }
 
-    if (minmax = -1)
-        return  ; minimized: leave it alone
+    if (minmax = -1) {
+        ; explorer/XAML newborns can still be mid-creation at show time
+        ; and report iconic before settling into maximized — one deferred
+        ; re-check, then leave them alone if genuinely minimized
+        if !isRetry
+            QueueDeferred(hwnd, "retry")
+        return "none"
+    }
+
+    ; snap: fill the next free slot if the monitor knows its layout
+    if (gPlacement = "snap") {
+        occ := CollectOccupied(targetMon, hwnd, wa)
+        grid := occ.Length > 0 ? DetectGrid(occ, wa) : ""
+        if (occ.Length > 0)
+            Log("snap check " hwnd ": occ=" occ.Length " grid=" (grid = "" ? "none" : grid))
+        if (grid != "") {
+            for cell in GridCells(grid, wa) {
+                if !CellOccupied(cell, occ) {
+                    SetWindowPosRect(hwnd, cell.l, cell.t, cell.r - cell.l, cell.b - cell.t)
+                    Log("snapped " hwnd " into " grid " free cell")
+                    return {l: cell.l, t: cell.t, r: cell.r, b: cell.b}
+                }
+            }
+        }
+    }
 
     ; normal window: center in the target work area
     x := wa.left + (waW - winW) // 2
@@ -288,6 +439,7 @@ MoveToMonitor(hwnd, targetMon) {
     y := Max(y, wa.top)
     SetWindowPosRect(hwnd, x, y, winW, winH)
     Log("moved " hwnd " -> " x "," y " on monitor " Hex(targetMon))
+    return {l: x, t: y, r: x + winW, b: y + winH}
 }
 
 SetWindowPosRect(hwnd, x, y, w, h) {
@@ -298,37 +450,93 @@ SetWindowPosRect(hwnd, x, y, w, h) {
 Hex(v) => Format("0x{:X}", v)
 
 ; ------------------------------------------------------------
-; Re-assert: some apps restore their own geometry right after
-; showing, walking back to the old monitor. Re-apply a few
-; times, then concede — the config file is the escape hatch.
+; Re-assert: apps undo placements — they restore their own saved
+; geometry, or maximize themselves right after showing. Hold the
+; slot we chose: re-apply the exact rect until it sticks.
+; desired = {l,t,r,b} rect, "" = maximized on the target monitor,
+; "none" = nothing to hold.
 ; ------------------------------------------------------------
-ScheduleReassert(hwnd, targetMon, attempt) {
-    SetTimer(() => Reassert(hwnd, targetMon, attempt), -350)
+ScheduleReassert(hwnd, targetMon, attempt, desired) {
+    QueueDeferred(hwnd, "reassert", targetMon, attempt, desired)
 }
 
-Reassert(hwnd, targetMon, attempt) {
+; deferred work runs from one persistent watchdog timer — one-shot
+; SetTimer closures proved unreliable when created inside hook callbacks
+QueueDeferred(hwnd, kind, targetMon := 0, attempt := 0, desired := "") {
+    global gPending
+    for item in gPending
+        if (item.hwnd = hwnd && item.kind = kind)
+            return
+    gPending.Push({hwnd: hwnd, kind: kind, at: A_TickCount,
+                   mon: targetMon, attempt: attempt, desired: desired})
+}
+
+Watchdog() {
+    global gPending
+    if (gPending.Length = 0)
+        return
+    now := A_TickCount
+    remaining := []
+    for item in gPending {
+        if (now - item.at < 400) {
+            remaining.Push(item)
+            continue
+        }
+        if (item.kind = "retry") {
+            HandleWindow(item.hwnd, true)
+        } else {
+            Reassert(item.hwnd, item.mon, item.attempt, item.desired)
+        }
+    }
+    gPending := remaining
+}
+
+Reassert(hwnd, targetMon, attempt, desired) {
     global
     if !DllCall("IsWindow", "ptr", hwnd)
         return
-    if (MonitorFromHwnd(hwnd) = targetMon)
-        return
+    if (desired = "") {
+        if (WinGetMinMax(hwnd) = 1 && MonitorFromHwnd(hwnd) = targetMon)
+            return
+    } else {
+        cur := WindowRect(hwnd)
+        if (WinGetMinMax(hwnd) != 1
+            && Abs(cur.left - desired.l) <= 8 && Abs(cur.top - desired.t) <= 8
+            && Abs(cur.right - desired.r) <= 8 && Abs(cur.bottom - desired.b) <= 8)
+            return
+    }
     if (attempt <= 0) {
         Log("gave up re-asserting " hwnd " (" WinGetProcessName(hwnd) ")")
         return
     }
-    Log("app moved itself back; re-asserting " hwnd " attempt " attempt)
-    MoveToMonitor(hwnd, targetMon)
-    ScheduleReassert(hwnd, targetMon, attempt - 1)
+    Log("app undid the placement; re-asserting " hwnd " attempt " attempt)
+    if (desired != "") {
+        if (WinGetMinMax(hwnd) = 1)
+            WinRestore(hwnd)
+        SetWindowPosRect(hwnd, desired.l, desired.t, desired.r - desired.l, desired.b - desired.t)
+    } else {
+        wa := MonitorWorkArea(targetMon)
+        WinRestore(hwnd)
+        rc := WindowRect(hwnd)
+        x := wa.left + ((wa.right - wa.left) - (rc.right - rc.left)) // 2
+        y := wa.top + ((wa.bottom - wa.top) - (rc.bottom - rc.top)) // 2
+        SetWindowPosRect(hwnd, x, y, rc.right - rc.left, rc.bottom - rc.top)
+        DllCall("ShowWindow", "ptr", hwnd, "int", SW_MAXIMIZE, "int")
+    }
+    ScheduleReassert(hwnd, targetMon, attempt - 1, desired)
 }
 
 ; ------------------------------------------------------------
 ; The decision itself
 ; ------------------------------------------------------------
 HandleWindow(hwnd, isRetry := false) {
-    global gSeen, gRules, gEnabled
+    global gSeen, gRules, gEnabled, gPlacement
+    Log("HandleWindow " hwnd " retry=" isRetry)
 
-    if !IsManageableWindow(hwnd, isRetry)
+    if !IsManageableWindow(hwnd, isRetry) {
+        Log("rejected by filter " hwnd " retry=" isRetry)
         return
+    }
     gSeen[hwnd] := true
     if (gSeen.Count > 400)
         PruneSeen()
@@ -357,12 +565,15 @@ HandleWindow(hwnd, isRetry := false) {
 
     if !targetMon
         return
-    if (MonitorFromHwnd(hwnd) = targetMon)
+    ; center mode skips windows already on the right monitor;
+    ; snap mode still places them into a free slot
+    if (MonitorFromHwnd(hwnd) = targetMon && gPlacement != "snap")
         return
 
     Log("new window " hwnd " (" proc " / " WinGetClass(hwnd) ") rule=" rule)
-    MoveToMonitor(hwnd, targetMon)
-    ScheduleReassert(hwnd, targetMon, 3)
+    desired := MoveToMonitor(hwnd, targetMon, isRetry)
+    if (desired != "none")
+        ScheduleReassert(hwnd, targetMon, 3, desired)
 }
 
 PruneSeen() {
@@ -395,6 +606,7 @@ BuildTray() {
 
     A_TrayMenu.Delete()
     A_TrayMenu.Add("Enabled`t(what makes windows follow you)", MenuToggleEnabled)
+    A_TrayMenu.Add("Snap into empty space", MenuToggleSnap)
     A_TrayMenu.Add("Run at startup", MenuToggleStartup)
     A_TrayMenu.Add()  ; separator
     A_TrayMenu.Add("Edit rules...", MenuEditRules)
@@ -407,11 +619,23 @@ BuildTray() {
 }
 
 RefreshTray() {
-    global gEnabled
+    global gEnabled, gPlacement
     if gEnabled
         A_TrayMenu.Check("Enabled`t(what makes windows follow you)")
     else
         A_TrayMenu.Uncheck("Enabled`t(what makes windows follow you)")
+    if (gPlacement = "snap")
+        A_TrayMenu.Check("Snap into empty space")
+    else
+        A_TrayMenu.Uncheck("Snap into empty space")
+}
+
+MenuToggleSnap(*) {
+    global
+    gPlacement := (gPlacement = "snap") ? "center" : "snap"
+    IniWrite(gPlacement, ConfigPath(), "general", "placement")
+    RefreshTray()
+    Log("toggled placement=" gPlacement)
 }
 
 MenuToggleEnabled(*) {
@@ -456,6 +680,7 @@ MenuQuit(*) {
 LoadConfig()
 BuildTray()
 Persistent()   ; v2: tray-only scripts exit when startup ends unless marked persistent
+SetTimer(Watchdog, 400)   ; drains the deferred re-check / re-assert queue
 gHookCallback := CallbackCreate(OnWinShow)
 gHookHandle := DllCall("SetWinEventHook",
     "uint", EVENT_OBJECT_SHOW, "uint", EVENT_OBJECT_SHOW,

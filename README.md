@@ -23,7 +23,18 @@ Requirements: Windows 10/11. No admin rights. Nothing is installed and no system
 
 ## What it does
 
-- **Follows the cursor** — a new app window lands on the monitor your mouse is on, centered in the work area. Desktop-icon launches, Start-menu launches, pinned-taskbar launches, folder windows — all covered.
+- **Follows the cursor** — a new app window lands on the monitor your mouse is on. Desktop-icon launches, Start-menu launches, pinned-taskbar launches, folder windows — all covered.
+- **Snaps into empty space (v0.2)** — OpenHere knows what's already on the monitor and fills the next free slot instead of stacking on top of it:
+
+```
+   window on the left half   ->  next window fills the right half
+   window on the left third  ->  next window takes the middle third
+   window in the top-left 1/4 ->  next takes top-right, then bottom-left
+   half + quarter occupied    ->  next fills the remaining quarter
+   nothing on the monitor     ->  centered, keeping the app's own size
+```
+
+  The grid is detected from the shape of existing windows (work area only — the taskbar is excluded), and per-app rules still win. A window that opens maximized is snapped into the free cell too; a genuinely full or ungridded screen falls back to plain centering. Toggle it any time: tray → **Snap into empty space**, or `placement=snap|center` in the ini.
 - **Preserves state** — maximized windows re-maximize on the target monitor; fullscreen borderless windows are moved whole; owned dialogs (Save As…) keep following their parent app.
 - **Fights back gracefully** — apps that restore their own saved geometry on startup (browsers, Office) get re-asserted a few times, then OpenHere concedes and you can pin them with a rule.
 - **Respects the shell** — taskbar, Start, search, Action Center, IME and XAML content-island ghosts are never touched.
@@ -43,7 +54,7 @@ Requirements: Windows 10/11. No admin rights. Nothing is installed and no system
 ```ini
 [general]
 enabled=1              ; the tray toggle writes here
-placement=center       ; center | remember_relative (planned)
+placement=snap         ; snap = fill the next free slot | center = always center
 
 [rules]
 ; per-app rules win over the global behavior:
@@ -80,14 +91,13 @@ Visual verification was done with per-monitor screenshots. Known benign quirk: W
 
 - The `Win+S` search panel is shell UI (`SearchHost.exe`) and is deliberately excluded in v0.1. Tip: on Windows 11 the search panel opens on whichever monitor's taskbar you click it from — use the taskbar search box on the screen you want.
 - Apps launched **minimized** are left alone.
-- `remember_relative` placement is designed but not implemented (`center` is always used for now).
-- A standalone `OpenHere.exe` (via Ahk2Exe) is planned for v0.2 — the compiler's CLI mode currently misbehaves on the dev machine, so v0.1 ships as a script, which AutoHotkey runs natively with one click.
+- With a maximized window covering the monitor there is no free cell to fill, so new windows are centered — close or unmaximize the big one and snapping resumes.
+- A standalone `OpenHere.exe` (via Ahk2Exe) is still pending — the compiler's CLI mode misbehaves on the dev machine, so OpenHere ships as a script, which AutoHotkey runs natively with one click.
 
 ## Roadmap
 
-- **v0.2** — compiled single-exe distribution, GitHub Release download, icon.
-- **v0.3** — `remember_relative` placement, a "fights back" hint writer, optional debug GUI.
-- **someday** — experimental shell-surface following (Start/search), auto-update check.
+- **v0.3** — compiled single-exe distribution, GitHub Release download, icon.
+- **later** — optional debug GUI, per-monitor snap-style presets, experimental shell-surface following (Start/search).
 
 ## Origin
 

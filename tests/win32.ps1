@@ -31,6 +31,8 @@ public class OpenHereWin32 {
     [DllImport("user32.dll")] public static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnumProc proc, IntPtr data);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wparam, IntPtr lparam);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int cmd);
 
     public const uint MONITOR_DEFAULTTONEAREST = 2;
     public const uint GW_OWNER = 4;
@@ -188,4 +190,31 @@ function Show-Monitors {
     Get-MonitorList | ForEach-Object {
         "monitor $($_.Index): ($($_.Left),$($_.Top))-($($_.Right),$($_.Bottom)) $($_.Width)x$($_.Height) primary=$($_.Primary)"
     }
+}
+
+function Get-WorkArea {
+    param([int]$Index)   # 1-based, per Get-MonitorList order
+    $m = Get-MonitorList | Where-Object Index -eq $Index
+    $mi = New-Object OpenHereWin32+MONITORINFO
+    $mi.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][OpenHereWin32+MONITORINFO])
+    [OpenHereWin32]::GetMonitorInfo($m.Handle, [ref]$mi) | Out-Null
+    return [pscustomobject]@{
+        Left = $mi.rcWork.L; Top = $mi.rcWork.T; Right = $mi.rcWork.R; Bottom = $mi.rcWork.B
+    }
+}
+
+function Set-WindowRect {
+    param([IntPtr]$Hwnd, [int]$L, [int]$T, [int]$R, [int]$B)
+    [OpenHereWin32]::ShowWindow($Hwnd, 9) | Out-Null   # SW_RESTORE: clear zoomed flag
+    Start-Sleep -Milliseconds 150
+    [OpenHereWin32]::SetWindowPos($Hwnd, [IntPtr]::Zero, $L, $T, $R - $L, $B - $T, 0x0014) | Out-Null
+}
+
+function Close-WindowSafe {
+    param([IntPtr]$Hwnd)
+    if ($Hwnd -eq [IntPtr]::Zero) { return }
+    # restore before closing so Explorer does not remember "maximized"
+    [OpenHereWin32]::ShowWindow($Hwnd, 9) | Out-Null
+    Start-Sleep -Milliseconds 100
+    Close-Window -Hwnd $Hwnd
 }
