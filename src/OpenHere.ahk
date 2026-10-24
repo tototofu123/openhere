@@ -297,26 +297,33 @@ CollectOccupied(targetMon, excludeHwnd, wa) {
             continue
         if ((r - l) * (b - t) < 0.08 * waW * waH)  ; tiny widgets don't dictate layout
             continue
-        occ.Push({l: l, t: t, r: r, b: b})
+        occ.Push({hwnd: hwnd, l: l, t: t, r: r, b: b})
     }
     return occ
 }
 
 DetectGrid(occ, wa) {
+    ; the grid is implied by the COLUMN-SHAPED windows; other windows
+    ; (full-width apps, odd sizes) don't veto it — they still block
+    ; whichever cells they cover, so there is nowhere false to snap
     waW := wa.right - wa.left
     waH := wa.bottom - wa.top
     anyShort := false
+    foundColumn := false
     widest := 0
     for w in occ {
         fw := (w.r - w.l) / waW
         fh := (w.b - w.t) / waH
-        if (fw < 0.26 || fw > 0.74)                ; not a column-shaped window
-            return ""
+        if (fw < 0.26 || fw > 0.74)
+            continue
+        foundColumn := true
         if (fh < 0.8)
             anyShort := true
         if (fw > widest)
             widest := fw
     }
+    if !foundColumn
+        return ""
     if (anyShort)
         return "2x2"                               ; quarter-shaped window present
     if (widest <= 0.45)
@@ -349,6 +356,39 @@ CellOccupied(cell, occ) {
         }
     }
     return false
+}
+
+; ------------------------------------------------------------
+; Snap-tidy: windows already living in a grid cell get flushed
+; exactly to the cell edges. Apps drift after birth (session
+; restore, self-centering); this is what makes it LOOK snapped.
+; Only touches near-members: center inside the cell, size within
+; 30% of the cell — never yoinks unrelated windows.
+; ------------------------------------------------------------
+TidyGrid(targetMon) {
+    global
+    wa := MonitorWorkArea(targetMon)
+    occ := CollectOccupied(targetMon, 0, wa)
+    grid := DetectGrid(occ, wa)
+    if (grid = "")
+        return
+    for cell in GridCells(grid, wa) {
+        cellW := cell.r - cell.l
+        cellH := cell.b - cell.t
+        for w in occ {
+            cx := (w.l + w.r) / 2
+            cy := (w.t + w.b) / 2
+            if (cx < cell.l || cx > cell.r || cy < cell.t || cy > cell.b)
+                continue
+            if (Abs((w.r - w.l) - cellW) > cellW * 0.3 || Abs((w.b - w.t) - cellH) > cellH * 0.3)
+                continue
+            if (Abs(w.l - cell.l) <= 3 && Abs(w.t - cell.t) <= 3
+                && Abs(w.r - cell.r) <= 3 && Abs(w.b - cell.b) <= 3)
+                continue
+            SetWindowPosRect(w.hwnd, cell.l, cell.t, cellW, cellH)
+            Log("tidied " w.hwnd " flush into " grid " cell")
+        }
+    }
 }
 
 ; ------------------------------------------------------------
@@ -457,17 +497,17 @@ Hex(v) => Format("0x{:X}", v)
 ; "none" = nothing to hold.
 ; ------------------------------------------------------------
 ScheduleReassert(hwnd, targetMon, attempt, desired) {
-    QueueDeferred(hwnd, "reassert", targetMon, attempt, desired)
+    QueueDeferred(hwnd, "reassert", targetMon, attempt, desired, 500)
 }
 
 ; deferred work runs from one persistent watchdog timer — one-shot
 ; SetTimer closures proved unreliable when created inside hook callbacks
-QueueDeferred(hwnd, kind, targetMon := 0, attempt := 0, desired := "") {
+QueueDeferred(hwnd, kind, targetMon := 0, attempt := 0, desired := "", delay := 400) {
     global gPending
     for item in gPending
         if (item.hwnd = hwnd && item.kind = kind)
             return
-    gPending.Push({hwnd: hwnd, kind: kind, at: A_TickCount,
+    gPending.Push({hwnd: hwnd, kind: kind, at: A_TickCount, delay: delay,
                    mon: targetMon, attempt: attempt, desired: desired})
 }
 
@@ -478,12 +518,14 @@ Watchdog() {
     now := A_TickCount
     remaining := []
     for item in gPending {
-        if (now - item.at < 400) {
+        if (now - item.at < item.delay) {
             remaining.Push(item)
             continue
         }
         if (item.kind = "retry") {
             HandleWindow(item.hwnd, true)
+        } else if (item.kind = "tidy") {
+            TidyGrid(item.mon)
         } else {
             Reassert(item.hwnd, item.mon, item.attempt, item.desired)
         }
@@ -572,8 +614,11 @@ HandleWindow(hwnd, isRetry := false) {
 
     Log("new window " hwnd " (" proc " / " WinGetClass(hwnd) ") rule=" rule)
     desired := MoveToMonitor(hwnd, targetMon, isRetry)
-    if (desired != "none")
-        ScheduleReassert(hwnd, targetMon, 3, desired)
+    if (desired != "none") {
+        ScheduleReassert(hwnd, targetMon, 5, desired)
+        if (desired != "")
+            QueueDeferred(hwnd, "tidy", targetMon,,, 1400)
+    }
 }
 
 PruneSeen() {
