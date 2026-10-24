@@ -60,6 +60,17 @@ gDebug := false
 gLogPath := ""
 gHookCallback := 0      ; keep referenced or the hook dies
 gPending := []          ; deferred re-checks / re-asserts (watchdog queue)
+
+; ---- grouping (idea: like agent-bus rooms — a name, members, one speaker)
+gGroups := []           ; live groups: {members, active, cell, gui, shown, offset, needRender}
+gGroupMode := false     ; grouping mode on = click windows to select
+gGroupSel := []         ; selection order
+gGroupOverlays := Map() ; hwnd -> highlight gui
+gGroupBanner := 0
+gGroupHotkey := "^!g"
+gSnapHotkey := "^!s"
+gTidyHotkey := "^!t"
+gGroupStyle := "overlap" 
 gHookHandle := 0
 
 ; ------------------------------------------------------------
@@ -107,6 +118,10 @@ LoadConfig() {
     gPlacement := IniRead(path, "general", "placement", "snap")
     gDebug := IniRead(path, "debug", "log", "0") = "1"
     gLogPath := A_ScriptDir "\openhere.log"
+    gGroupHotkey := IniRead(path, "grouping", "hotkey", "^!g")
+    gSnapHotkey := IniRead(path, "grouping", "snap_hotkey", "^!s")
+    gTidyHotkey := IniRead(path, "grouping", "tidy_hotkey", "^!t")
+    gGroupStyle := IniRead(path, "grouping", "mode", "overlap")
 
     gRules := Map()
     ; parse [rules] from the file directly: IniRead cannot return a
@@ -513,6 +528,7 @@ QueueDeferred(hwnd, kind, targetMon := 0, attempt := 0, desired := "", delay := 
 
 Watchdog() {
     global gPending
+    MaintainGroups()
     if (gPending.Length = 0)
         return
     now := A_TickCount
@@ -526,6 +542,8 @@ Watchdog() {
             HandleWindow(item.hwnd, true)
         } else if (item.kind = "tidy") {
             TidyGrid(item.mon)
+        } else if (item.kind = "hotkeys") {
+            RegisterHotkeys(item.attempt)
         } else {
             Reassert(item.hwnd, item.mon, item.attempt, item.desired)
         }
@@ -654,6 +672,10 @@ BuildTray() {
     A_TrayMenu.Add("Snap into empty space", MenuToggleSnap)
     A_TrayMenu.Add("Run at startup", MenuToggleStartup)
     A_TrayMenu.Add()  ; separator
+    A_TrayMenu.Add()
+    A_TrayMenu.Add("Group windows`t" gGroupHotkey, (*) => GroupHotkey())
+    A_TrayMenu.Add("Snap active window`t" gSnapHotkey, (*) => SnapActiveWindow())
+    A_TrayMenu.Add("Tidy this monitor`t" gTidyHotkey, (*) => TidyNow())
     A_TrayMenu.Add("Edit rules...", MenuEditRules)
     A_TrayMenu.Add("Reload rules", MenuReloadRules)
     A_TrayMenu.Add()
@@ -724,8 +746,10 @@ MenuQuit(*) {
 ; ------------------------------------------------------------
 LoadConfig()
 BuildTray()
+CoordMode "Mouse", "Screen"   ; v2 defaults to Client-relative — placement needs screen coords
 Persistent()   ; v2: tray-only scripts exit when startup ends unless marked persistent
-SetTimer(Watchdog, 400)   ; drains the deferred re-check / re-assert queue
+SetTimer(Watchdog, 400)   ; drains the deferred re-check / re-assert queue + group upkeep
+RegisterHotkeys()
 gHookCallback := CallbackCreate(OnWinShow)
 gHookHandle := DllCall("SetWinEventHook",
     "uint", EVENT_OBJECT_SHOW, "uint", EVENT_OBJECT_SHOW,
@@ -735,3 +759,319 @@ gHookHandle := DllCall("SetWinEventHook",
 if !gHookHandle
     Log("SetWinEventHook FAILED — falling back is required (this should not happen)")
 Log("OpenHere running; hook=" Hex(gHookHandle) " ini=" ConfigPath())
+
+; ============================================================
+;  Grouping — press the group hotkey, click the windows you want
+;  (translucent highlight, click again to unselect), press the
+;  hotkey again to confirm. Members stack into one cell with a
+;  floating tab bar: click a tab to switch, arrows when there are
+;  more tabs than fit, bar visible only while a member is active.
+;  Vocabulary borrowed from agent-bus: a group is a room; the
+;  active member is the speaker.
+; ============================================================
+
+#HotIf
+~LButton::GroupModeClick()
+Esc::GroupEsc()
+#HotIf
+
+GroupEsc() {
+    global
+    if gGroupMode
+        CancelGroupMode()
+}
+
+RegisterHotkeys(attempt := 5) {
+    global
+    ok := true
+    try Hotkey(gGroupHotkey, GroupHotkey)
+    catch Error as err {
+        ok := false
+        Log("hotkey '" gGroupHotkey "' not registered: " err.Message)
+    }
+    try Hotkey(gSnapHotkey, SnapActiveWindow)
+    catch Error as err {
+        ok := false
+        Log("hotkey '" gSnapHotkey "' not registered: " err.Message)
+    }
+    try Hotkey(gTidyHotkey, TidyNow)
+    catch Error as err {
+        ok := false
+        Log("hotkey '" gTidyHotkey "' not registered: " err.Message)
+    }
+    if (!ok && attempt > 0) {
+        ; a just-killed previous instance can still hold the hotkeys
+        ; for a moment — retry through the watchdog
+        gPending.Push({hwnd: 0, kind: "hotkeys", at: A_TickCount, delay: 1000,
+                       mon: 0, attempt: attempt - 1, desired: ""})
+    }
+    Log("hotkeys ready (ok=" (ok ? "1" : "0") ", attempt " (6 - attempt) "/5): group=" gGroupHotkey " snap=" gSnapHotkey " tidy=" gTidyHotkey)
+}
+
+GroupHotkey(hkName := "") {
+    global
+    if gGroupMode
+        ConfirmGroup()
+    else
+        StartGroupMode()
+}
+
+StartGroupMode() {
+    global
+    if gGroupMode
+        return
+    gGroupMode := true
+    gGroupSel := []
+    gGroupBanner := Gui("-Caption +AlwaysOnTop +ToolWindow +E0x08000000 +E0x20")
+    gGroupBanner.BackColor := "0B3D91"
+    gGroupBanner.MarginX := 10
+    gGroupBanner.MarginY := 4
+    gGroupBanner.Add("Text", "cFFFFFF", "GROUPING — click windows to add (click again removes) · " gGroupHotkey " to confirm · Esc cancels")
+    gGroupBanner.Show("x" (A_ScreenWidth // 2 - 260) " y8 NA")
+    Log("grouping mode ON")
+}
+
+CancelGroupMode() {
+    global
+    if !gGroupMode
+        return
+    ClearOverlays()
+    try gGroupBanner.Destroy()
+    gGroupBanner := 0
+    gGroupMode := false
+    Log("grouping mode cancelled")
+}
+
+ClearOverlays() {
+    global gGroupOverlays
+    for hwnd, g in gGroupOverlays
+        try g.Destroy()
+    gGroupOverlays := Map()
+}
+
+GroupModeClick() {
+    global
+    if !gGroupMode
+        return
+    MouseGetPos ,, &w
+    Log("group-click raw w=" w)
+    if !w
+        return
+    if (StrLower(WinGetProcessName(w)) = StrLower(WinGetProcessName(A_ScriptHwnd)))
+        return                                   ; our own GUIs
+    cls := WinGetClass(w)
+    if (cls = "Progman" || cls = "WorkerW" || cls = "Shell_TrayWnd")
+        return                                   ; desktop / taskbar
+    for i, m in gGroupSel {
+        if (m = w) {
+            gGroupSel.RemoveAt(i)
+            if gGroupOverlays.Has(w) {
+                gGroupOverlays[w].Destroy()
+                gGroupOverlays.Delete(w)
+            }
+            Log("group-select removed " w " (" gGroupSel.Length " selected)")
+            return
+        }
+    }
+    if (gGroupSel.Length >= 12) {
+        Log("group-select limit reached (12)")
+        return
+    }
+    gGroupSel.Push(w)
+    AddOverlay(w)
+    Log("group-select added " w " (" gGroupSel.Length " selected)")
+}
+
+AddOverlay(hwnd) {
+    global gGroupOverlays
+    g := Gui("-Caption +AlwaysOnTop +ToolWindow +E0x20 +E0x80000 +E0x08000000")
+    g.BackColor := "00A0E9"
+    rc := WindowRect(hwnd)
+    g.Show("x" (rc.left - 3) " y" (rc.top - 3) " w" (rc.right - rc.left + 6) " h" (rc.bottom - rc.top + 6) " NA")
+    WinSetTransparent(110, g)
+    gGroupOverlays[hwnd] := g
+}
+
+ConfirmGroup() {
+    global
+    sel := gGroupSel.Clone()
+    ClearOverlays()
+    try gGroupBanner.Destroy()
+    gGroupBanner := 0
+    gGroupMode := false
+    if (sel.Length < 2) {
+        Log("group needs 2+ windows (" sel.Length " selected) — cancelled")
+        return
+    }
+    activeHwnd := sel[sel.Length]                ; last clicked = the speaker
+    mon := MonitorFromHwnd(activeHwnd)
+    wa := MonitorWorkArea(mon)
+
+    ; home cell: the grid cell the speaker is in; if the monitor has no
+    ; grid, the group stacks where the speaker is right now
+    cell := ""
+    occ := CollectOccupied(mon, 0, wa)
+    grid := occ.Length > 0 ? DetectGrid(occ, wa) : ""
+    if (grid != "") {
+        rc := WindowRect(activeHwnd)
+        cx := (rc.left + rc.right) / 2
+        cy := (rc.top + rc.bottom) / 2
+        for c in GridCells(grid, wa) {
+            if (cx > c.l && cx < c.r && cy > c.t && cy < c.b) {
+                cell := c
+                break
+            }
+        }
+    }
+    if (cell = "") {
+        rc := WindowRect(activeHwnd)
+        cell := {l: rc.left, t: rc.top, r: rc.right, b: rc.bottom}
+    }
+
+    ; bring every member into the home cell — unsnapped windows
+    ; get snapped by construction
+    for i, h in sel {
+        if (h = activeHwnd)
+            continue
+        if (WinGetMinMax(h) = 1)
+            WinRestore(h)
+        SetWindowPosRect(h, cell.l, cell.t, cell.r - cell.l, cell.b - cell.t)
+    }
+
+    grp := {members: sel, active: sel.Length, cell: {l: cell.l, t: cell.t, r: cell.r, b: cell.b},
+            gui: 0, shown: true, offset: 0, needRender: false}
+    RenderBar(grp)
+    gGroups.Push(grp)
+    Log("group created: " sel.Length " members in cell " cell.l "," cell.t " (style " gGroupStyle ")")
+}
+
+RenderBar(grp) {
+    try if (grp.gui) {
+        grp.gui.Destroy()
+        grp.gui := 0
+    }
+    n := grp.members.Length
+    if (n = 0)
+        return
+    barW := grp.cell.r - grp.cell.l
+    tabW := 110
+    vis := Min(n, Max(1, (barW - 44) // tabW))
+    if (grp.offset > n - vis)
+        grp.offset := Max(0, n - vis)
+    g := Gui("-Caption +AlwaysOnTop +ToolWindow +E0x08000000")
+    g.BackColor := "1B1B1B"
+    g.MarginX := 0
+    g.MarginY := 0
+    x := 3
+    if (grp.offset > 0) {
+        b1 := g.Add("Text", "x" x " y4 w18 h18 Center cE0E0E0", "<")
+        b1.OnEvent("Click", (*) => (grp.offset := Max(0, grp.offset - 1), grp.needRender := true))
+        x += 20
+    }
+    i := 0
+    while (i < vis && grp.offset + i < n) {
+        idx := grp.offset + i + 1
+        title := WinGetTitle(grp.members[idx])
+        if (StrLen(title) > 16)
+            title := SubStr(title, 1, 15) "…"
+        color := (idx = grp.active) ? "4FC1FF" : "B4B4B4"
+        tab := g.Add("Text", "x" x " y4 w" tabW " h18 Center c" color, title)
+        tab.OnEvent("Click", ActivateMember.Bind(grp, idx))
+        x += tabW + 2
+        i++
+    }
+    if (grp.offset + vis < n) {
+        b2 := g.Add("Text", "x" x " y4 w18 h18 Center cE0E0E0", ">")
+        b2.OnEvent("Click", (*) => (grp.offset := grp.offset + 1, grp.needRender := true))
+    }
+    grp.gui := g
+    g.Show("x" grp.cell.l " y" grp.cell.t " w" barW " h26 NA")
+    grp.shown := true
+}
+
+ActivateMember(grp, idx, *) {
+    if (idx > grp.members.Length)
+        return
+    prev := grp.active
+    grp.active := idx
+    if (gGroupStyle = "minimize" && prev != idx && prev >= 1 && prev <= grp.members.Length)
+        WinMinimize(grp.members[prev])
+    WinActivate(grp.members[idx])
+    grp.needRender := true
+}
+
+MaintainGroups() {
+    global gGroups
+    if (gGroups.Length = 0)
+        return
+    fg := WinExist("A")
+    alive := []
+    for grp in gGroups {
+        live := []
+        for m in grp.members
+            if DllCall("IsWindow", "ptr", m)
+                live.Push(m)
+        grp.members := live
+        if (grp.members.Length = 0) {
+            try grp.gui.Destroy()
+            Log("group dissolved (no members left)")
+            continue
+        }
+        if (grp.active > grp.members.Length)
+            grp.active := grp.members.Length
+        if (grp.needRender) {
+            grp.needRender := false
+            wasShown := grp.shown
+            RenderBar(grp)
+            grp.shown := wasShown
+        }
+        vis := false
+        for m in grp.members
+            if (m = fg)
+                vis := true
+        if (vis && !grp.shown) {
+            grp.gui.Show("NA")
+            grp.shown := true
+        } else if (!vis && grp.shown) {
+            grp.gui.Hide()
+            grp.shown := false
+        }
+        alive.Push(grp)
+    }
+    gGroups := alive
+}
+
+SnapActiveWindow(hkName := "") {
+    global
+    hwnd := WinExist("A")
+    if !hwnd
+        return
+    if (StrLower(WinGetProcessName(hwnd)) = StrLower(WinGetProcessName(A_ScriptHwnd)))
+        return
+    mon := MonitorFromHwnd(hwnd)
+    wa := MonitorWorkArea(mon)
+    occ := CollectOccupied(mon, hwnd, wa)
+    grid := occ.Length > 0 ? DetectGrid(occ, wa) : ""
+    if (grid != "") {
+        for cell in GridCells(grid, wa) {
+            if !CellOccupied(cell, occ) {
+                if (WinGetMinMax(hwnd) = 1)
+                    WinRestore(hwnd)
+                SetWindowPosRect(hwnd, cell.l, cell.t, cell.r - cell.l, cell.b - cell.t)
+                ScheduleReassert(hwnd, mon, 5, {l: cell.l, t: cell.t, r: cell.r, b: cell.b})
+                QueueDeferred(hwnd, "tidy", mon,,, 1400)
+                Log("snap-active " hwnd " into " grid " free cell")
+                return
+            }
+        }
+    }
+    Log("snap-active: no free cell for " hwnd)
+}
+
+TidyNow(hkName := "") {
+    global
+    pt := CursorPoint()
+    mon := MonitorFromPointPacked(pt.x, pt.y)
+    TidyGrid(mon)
+    Log("tidy-now on monitor " Hex(mon))
+}

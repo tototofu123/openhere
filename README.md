@@ -39,6 +39,21 @@ Requirements: Windows 10/11. No admin rights. Nothing is installed and no system
 - **Fights back gracefully** — apps that restore their own saved geometry on startup (browsers, Office) get re-asserted a few times, then OpenHere concedes and you can pin them with a rule.
 - **Respects the shell** — taskbar, Start, search, Action Center, IME and XAML content-island ghosts are never touched.
 
+## Grouping (v0.3)
+
+Press **Ctrl+Alt+G** to enter grouping mode: click the windows you want to group (a translucent highlight marks the selection, click again to unselect), then press **Ctrl+Alt+G** again to confirm. The members stack into one cell — unsnapped ones get snapped by construction — with a floating **tab bar** across the top of the cell: click a tab to switch windows, arrows appear when there are more tabs than fit (10+ on a half-cell, titles truncated), and the bar is only visible while a member of the group is the foreground window. Groups dissolve automatically when their last window closes. Esc cancels grouping mode.
+
+The vocabulary is borrowed from [agent-bus](https://github.com/tototofu123/agent-bus): a group is a *room*, members join by clicking, and one member is the *speaker*. `mode=minimize` in the ini makes the previous speaker minimize on switch instead of stacking.
+
+Two more hotkeys:
+
+| Hotkey | Action |
+|---|---|
+| **Ctrl+Alt+S** | Snap the active window into the next free cell of its monitor |
+| **Ctrl+Alt+T** | Flush drifted grid windows on the current monitor into place |
+
+Hotkeys are configurable in `[grouping]` of the ini (`^` = Ctrl, `!` = Alt, `+` = Shift).
+
 ### Tray menu
 
 | Item | What it does |
@@ -96,8 +111,8 @@ Visual verification was done with per-monitor screenshots. Known benign quirk: W
 
 ## Roadmap
 
-- **v0.3** — compiled single-exe distribution, GitHub Release download, icon.
-- **later** — optional debug GUI, per-monitor snap-style presets, experimental shell-surface following (Start/search).
+- **v0.4** — compiled single-exe distribution, GitHub Release download, icon.
+- **later** — per-group persistence across restarts, drag-to-reorder tabs, per-monitor snap-style presets, experimental shell-surface following (Start/search).
 
 ## Origin
 
