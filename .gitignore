@@ -1,0 +1,15 @@
+# user state (auto-created next to the script)
+src/openhere.ini
+src/openhere.log
+
+# build artifacts
+dist/
+tools/
+*.zip
+
+# test artifacts (screenshots contain the user's desktop)
+tests/*.png
+*.txt
+
+# editor
+*.bak
