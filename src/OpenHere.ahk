@@ -700,11 +700,26 @@ RefreshTray() {
 
 ; ---- tray icon: the logo; a left-click is the enable/disable toggle
 TrayIconPath(on) {
-    name := on ? "tray-on.ico" : "tray-off.ico"
-    for c in [A_ScriptDir "\assets\" name, A_ScriptDir "\..\assets\" name]
-        if FileExist(c)
-            return c
-    return ""
+    return LatestIcon(on ? "tray-on-" : "tray-off-")
+}
+
+; icons are hash-versioned by the generator — glob for the newest so the
+; shell icon cache can never serve a stale render
+LatestIcon(prefix) {
+    best := ""
+    bestTime := 0
+    for dir in [A_ScriptDir "\assets\", A_ScriptDir "\..\assets\"]
+    {
+        Loop Files, dir prefix "*.ico"
+        {
+            if (A_LoopFileTimeModified > bestTime)
+            {
+                bestTime := A_LoopFileTimeModified
+                best := A_LoopFileFullPath
+            }
+        }
+    }
+    return best
 }
 
 UpdateTrayIcon() {
@@ -1118,11 +1133,7 @@ DesktopShortcutPath() {
 }
 
 DesktopIconPath(on) {
-    name := on ? "desktop-on.ico" : "desktop-off.ico"
-    for c in [A_ScriptDir "\assets\" name, A_ScriptDir "\..\assets\" name]
-        if FileExist(c)
-            return c
-    return ""
+    return LatestIcon(on ? "desktop-on-" : "desktop-off-")
 }
 
 EnsureDesktopShortcut() {

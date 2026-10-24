@@ -13,3 +13,6 @@ tests/*.png
 
 # editor
 *.bak
+
+# generated per-machine toggle helper
+src/toggle.ahk
