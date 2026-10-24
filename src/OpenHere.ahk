@@ -695,6 +695,7 @@ RefreshTray() {
     else
         A_TrayMenu.Uncheck("Snap into empty space")
     UpdateTrayIcon()
+    UpdateDesktopShortcutIcon()
 }
 
 ; ---- tray icon: the logo; a left-click is the enable/disable toggle
@@ -774,6 +775,7 @@ Persistent()   ; v2: tray-only scripts exit when startup ends unless marked pers
 SetTimer(Watchdog, 400)   ; drains the deferred re-check / re-assert queue + group upkeep
 RegisterHotkeys()
 OnMessage(0x404, OnTrayIconMsg)   ; tray icon left-click = toggle
+CreateDesktopShortcut()
 gHookCallback := CallbackCreate(OnWinShow)
 gHookHandle := DllCall("SetWinEventHook",
     "uint", EVENT_OBJECT_SHOW, "uint", EVENT_OBJECT_SHOW,
@@ -1101,3 +1103,60 @@ TidyNow(hkName := "") {
     Log("tidy-now on monitor " Hex(mon))
 }
 
+
+; ---- desktop shortcut: launcher with the state-colored logo.
+; The .lnk's icon file is swapped green/red whenever the state flips
+; (two separate files, so the shell icon cache never goes stale).
+
+DesktopShortcutPath() {
+    return A_Desktop "\OpenHere.lnk"
+}
+
+DesktopIconPath(on) {
+    name := on ? "desktop-on.ico" : "desktop-off.ico"
+    for c in [A_ScriptDir "\assets\" name, A_ScriptDir "\..\" name, A_ScriptDir "\..\assets\" name]
+        if FileExist(c)
+            return c
+    return ""
+}
+
+CreateDesktopShortcut() {
+    global
+    lnk := DesktopShortcutPath()
+    if FileExist(lnk)
+        return
+    try {
+        ws := ComObject("WScript.Shell")
+        sc := ws.CreateShortcut(lnk)
+        sc.TargetPath := A_AhkPath
+        sc.Arguments := '"' A_ScriptFullPath '"'
+        sc.WorkingDirectory := A_ScriptDir
+        icon := DesktopIconPath(gEnabled)
+        if (icon != "")
+            sc.IconLocation := icon
+        sc.Description := "OpenHere — apps open where you are"
+        sc.Save()
+        Log("desktop shortcut created at " lnk)
+    } catch Error as err
+        Log("desktop shortcut failed: " err.Message)
+}
+
+UpdateDesktopShortcutIcon() {
+    global
+    lnk := DesktopShortcutPath()
+    if !FileExist(lnk)
+        return
+    icon := DesktopIconPath(gEnabled)
+    if (icon = "")
+        return
+    try {
+        ws := ComObject("WScript.Shell")
+        sc := ws.CreateShortcut(lnk)
+        if !InStr(sc.IconLocation, icon) {
+            sc.IconLocation := icon
+            sc.Save()
+            Log("desktop shortcut icon -> " (gEnabled ? "green" : "red"))
+        }
+    } catch Error as err
+        Log("desktop icon update failed: " err.Message)
+}
