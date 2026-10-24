@@ -1151,10 +1151,10 @@ EnsureDesktopShortcut() {
             sc.IconLocation := icon
             changed := true
         }
-        if (changed) {
-            sc.Save()
-            Log("desktop shortcut " (existed ? "updated" : "created") " (double-click = toggle)")
-        }
+        changed := true   ; always save — triggers a shell notification so
+                          ; the desktop re-renders the icon after regeneration
+        sc.Save()
+        Log("desktop shortcut " (existed ? "updated" : "created") " (double-click = toggle)")
     } catch Error as err
         Log("desktop shortcut failed: " err.Message)
 }
