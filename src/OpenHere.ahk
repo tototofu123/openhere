@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
 
 ; ============================================================
@@ -108,6 +108,9 @@ log=0
 hotkey=^!g
 ; enable/disable the whole app
 enabled_hotkey=^!o
+; group tab bar: always = visible while the group exists (recommended)
+;                foreground = only while a member is the active window
+bar_visibility=always
 
 [media]
 ; extra process names treated as media players (comma-separated):
@@ -151,6 +154,7 @@ LoadConfig() {
     gSnapHotkey := IniRead(path, "grouping", "snap_hotkey", "^!s")
     gTidyHotkey := IniRead(path, "grouping", "tidy_hotkey", "^!t")
     gGroupStyle := IniRead(path, "grouping", "mode", "overlap")
+    gBarVisibility := IniRead(path, "grouping", "bar_visibility", "always")
     gActivateOnMove := IniRead(path, "general", "activate_on_move", "1") = "1"
 
     gRules := Map()
@@ -240,10 +244,17 @@ WindowRect(hwnd) {
 ; ------------------------------------------------------------
 ; Decision filter — is this hwnd a real app window we manage?
 ; ------------------------------------------------------------
-IsManageableWindow(hwnd, isRetry := false) {
+; returns true = manageable. Rejections are STABLE (ghost/shell — safe
+; to mark seen) unless the failure is a TRANSIENT birth state (cloaked
+; / titleless), in which case &transientRej is set: the caller queues a
+; retry and drops the seen-mark so a later state is re-processed.
+IsManageableWindow(hwnd, isRetry := false, &transientRej := false, fromHook := false) {
     global gSeen, SHELL_CLASSES, SHELL_PROCESSES
 
-    if gSeen.Has(hwnd)
+    ; the hook is authoritative: a SHOW event is news even for a window
+    ; a previous transient state already marked seen. The sweep stays
+    ; seen-gated (it is only the backstop).
+    if !isRetry && !fromHook && gSeen.Has(hwnd)
         return false
     if !hwnd || !DllCall("IsWindow", "ptr", hwnd)
         return false
@@ -255,21 +266,21 @@ IsManageableWindow(hwnd, isRetry := false) {
     ; unowned — owned dialogs follow their parent app
     if DllCall("GetWindow", "ptr", hwnd, "uint", GW_OWNER, "ptr")
         return false
-    ; not a cloaked UWP/ghost window
+    ; cloaked windows are mid-launch — transient, not a ghost verdict
     cloaked := 0
     DllCall("dwmapi\DwmGetWindowAttribute", "ptr", hwnd, "uint", DWMWA_CLOAKED,
             "uint*", &cloaked, "uint", 4, "int")
-    if (cloaked != 0)
+    if (cloaked != 0) {
+        transientRej := true
         return false
+    }
     exStyle := DllCall("GetWindowLongPtrW", "ptr", hwnd, "int", GWL_EXSTYLE, "ptr")
     if (exStyle & WS_EX_TOOLWINDOW) || (exStyle & WS_EX_NOACTIVATE)
         return false
     ; XAML apps (Win11 notepad etc.) show the window before setting
-    ; its title — give it one deferred chance instead of rejecting
+    ; their title — transient too
     if DllCall("GetWindowTextLengthW", "ptr", hwnd, "int") = 0 {
-        if (isRetry)
-            return false
-        QueueDeferred(hwnd, "retry")
+        transientRej := true
         return false
     }
 
@@ -630,7 +641,7 @@ Watchdog() {
             continue
         }
         if (item.kind = "retry") {
-            HandleWindow(item.hwnd, true)
+            HandleWindow(item.hwnd, true, false, item.attempt)
         } else if (item.kind = "tidy") {
             TidyGrid(item.mon)
         } else if (item.kind = "hotkeys") {
@@ -682,15 +693,27 @@ Reassert(hwnd, targetMon, attempt, desired) {
 ; ------------------------------------------------------------
 ; The decision itself
 ; ------------------------------------------------------------
-HandleWindow(hwnd, isRetry := false) {
+HandleWindow(hwnd, isRetry := false, fromHook := false, retryAttempt := 0) {
     global gSeen, gRules, gEnabled, gPlacement
-    Log("HandleWindow " hwnd " retry=" isRetry)
 
-    if !IsManageableWindow(hwnd, isRetry) {
-        Log("rejected by filter " hwnd " retry=" isRetry)
+    ; mark seen on FIRST encounter: every window is processed once by
+    ; the hook or the sweep (rejected ghosts included). Retries re-enter
+    ; with isRetry=true (no mark); hook events re-enter with
+    ; fromHook=true (seen-check bypassed — SHOW is always news).
+    transientRej := false
+    ok := IsManageableWindow(hwnd, isRetry, &transientRej, fromHook)
+    if !isRetry
+        gSeen[hwnd] := true
+    if transientRej {
+        ; birth state (cloaked/titleless): keep the seen-mark (the sweep
+        ; must not spin on it) and run an escalating retry chain — the
+        ; hook's SHOW event usually lands first anyway
+        if (retryAttempt < 4)
+            QueueDeferred(hwnd, "retry", 0, retryAttempt + 1, "", 400 * 2 ** (retryAttempt + 1))
         return
     }
-    gSeen[hwnd] := true
+    if !ok
+        return
     if (gSeen.Count > 400)
         PruneSeen()
     if !gEnabled
@@ -749,15 +772,32 @@ PruneSeen() {
             gSeen.Delete(hwnd)
 }
 
+; safety net: the WinEvent hook occasionally misses a window show on
+; this machine — sweep every 700ms and handle anything unseen. gSeen
+; makes both paths idempotent.
+SweepNewWindows() {
+    global gSeen, gEnabled
+    for hwnd in WinGetList() {
+        if gSeen.Has(hwnd)
+            continue
+        
+        if !DllCall("IsWindowVisible", "ptr", hwnd, "int")
+            continue
+        try HandleWindow(hwnd)
+        catch Error {
+            gSeen[hwnd] := true
+        }
+    }
+}
+
 OnWinShow(hHook, event, hwnd, idObject, idChild, eventThread, eventTime) {
     ; OBJID_WINDOW (0) with index 0 marks the window object itself
     if (idObject != 0 || idChild != 0)
         return
-    Log("EVENT hwnd=" hwnd " class=" (DllCall("IsWindow", "ptr", hwnd) ? WinGetClass(hwnd) : "?"))
-    try HandleWindow(hwnd)
-    catch Error {
-        ; elevated or half-dead window — mark seen and move on,
-        ; do not spam the log on every repeated show event
+    try HandleWindow(hwnd, false, true)
+    catch Error as err {
+        ; any throw here silently drops the window — always log it
+        try Log("HOOK ERROR hwnd=" hwnd ": " err.Message " in " err.What)
         gSeen[hwnd] := true
     }
 }
@@ -891,6 +931,7 @@ BuildTray()
 CoordMode "Mouse", "Screen"   ; v2 defaults to Client-relative — placement needs screen coords
 Persistent()   ; v2: tray-only scripts exit when startup ends unless marked persistent
 SetTimer(Watchdog, 400)   ; drains the deferred re-check / re-assert queue + group upkeep
+SetTimer(SweepNewWindows, 700)   ; hook fallback: catch windows the hook missed
 RegisterHotkeys()
 OnMessage(0x404, OnTrayIconMsg)   ; tray icon left-click = toggle
 try WriteToggleHelper()
@@ -1005,8 +1046,7 @@ ClearOverlays() {
 
 GroupModeClick() {
     global
-    Log("group-click ignored (mode off)")
-    if !gGroupMode
+        if !gGroupMode
         return
     MouseGetPos ,, &w
     Log("group-click raw w=" w)
@@ -1213,10 +1253,13 @@ MaintainGroups() {
             RenderBar(grp)
             grp.shown := wasShown
         }
-        vis := false
-        for m in grp.members
-            if (m = fg)
-                vis := true
+        vis := true
+        if (gBarVisibility = "foreground") {
+            vis := false
+            for m in grp.members
+                if (m = fg)
+                    vis := true
+        }
         if (vis && !grp.shown) {
             grp.gui.Show("NA")
             grp.shown := true
