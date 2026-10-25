@@ -599,7 +599,11 @@ Hex(v) => Format("0x{:X}", v)
 ; "none" = nothing to hold.
 ; ------------------------------------------------------------
 ScheduleReassert(hwnd, targetMon, attempt, desired) {
-    QueueDeferred(hwnd, "reassert", targetMon, attempt, desired, 500)
+    ; de-escalating: 400ms, 600ms, 900ms, 1.4s, 2s, 2.8s — slow-restoring
+    ; apps (Windows Terminal restores its own geometry late) get held too
+    static delays := [400, 600, 900, 1400, 2000, 2800]
+    idx := Max(1, Min(delays.Length, delays.Length - attempt + 1))
+    QueueDeferred(hwnd, "reassert", targetMon, attempt, desired, delays[idx])
 }
 
 ; deferred work runs from one persistent watchdog timer — one-shot
@@ -727,7 +731,7 @@ HandleWindow(hwnd, isRetry := false) {
     wasOnTarget := (MonitorFromHwnd(hwnd) = targetMon)
     desired := MoveToMonitor(hwnd, targetMon, isRetry)
     if (desired != "none") {
-        ScheduleReassert(hwnd, targetMon, 5, desired)
+        ScheduleReassert(hwnd, targetMon, 6, desired)
         if (desired != "") {
             QueueDeferred(hwnd, "tidy", targetMon,,, 1400)
             ; a window moved across monitors without activation keeps its
@@ -1257,7 +1261,7 @@ SnapActiveWindow(hkName := "") {
                 if (WinGetMinMax(hwnd) = 1)
                     WinRestore(hwnd)
                 SetWindowPosRect(hwnd, cell.l, cell.t, cell.r - cell.l, cell.b - cell.t)
-                ScheduleReassert(hwnd, mon, 5, {l: cell.l, t: cell.t, r: cell.r, b: cell.b})
+                ScheduleReassert(hwnd, mon, 6, {l: cell.l, t: cell.t, r: cell.r, b: cell.b})
                 QueueDeferred(hwnd, "tidy", mon,,, 1400)
                 Log("snap-active " hwnd " into " grid " free cell")
                 return
