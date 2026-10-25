@@ -69,6 +69,7 @@ gGroupOverlays := Map() ; hwnd -> highlight gui
 gGroupBanner := 0
 gGroupHotkey := "^!g"
 gEnabledHotkey := "^!o"
+gActivateOnMove := true
 gMediaProcs := Map()
 gSnapHotkey := "^!s"
 gTidyHotkey := "^!t"
@@ -93,6 +94,9 @@ enabled=1
 ;                     quarter -> next quarter, half+quarter -> last quarter)
 ;            center = always center new windows (v0.1 behavior)
 placement=snap
+; activate a window after moving it across monitors so its taskbar
+; button follows (newly launched apps also come to the front)
+activate_on_move=1
 
 [debug]
 ; set to 1 to write a log of every decision next to this file
@@ -147,6 +151,7 @@ LoadConfig() {
     gSnapHotkey := IniRead(path, "grouping", "snap_hotkey", "^!s")
     gTidyHotkey := IniRead(path, "grouping", "tidy_hotkey", "^!t")
     gGroupStyle := IniRead(path, "grouping", "mode", "overlap")
+    gActivateOnMove := IniRead(path, "general", "activate_on_move", "1") = "1"
 
     gRules := Map()
     ; parse [rules] from the file directly: IniRead cannot return a
@@ -626,6 +631,8 @@ Watchdog() {
             TidyGrid(item.mon)
         } else if (item.kind = "hotkeys") {
             RegisterHotkeys(item.attempt)
+        } else if (item.kind = "activate") {
+            ActivateForTaskbar(item.hwnd)
         } else {
             Reassert(item.hwnd, item.mon, item.attempt, item.desired)
         }
@@ -717,11 +724,17 @@ HandleWindow(hwnd, isRetry := false) {
         return
     }
     Log("new window " hwnd " (" proc " / " WinGetClass(hwnd) ") rule=" rule)
+    wasOnTarget := (MonitorFromHwnd(hwnd) = targetMon)
     desired := MoveToMonitor(hwnd, targetMon, isRetry)
     if (desired != "none") {
         ScheduleReassert(hwnd, targetMon, 5, desired)
-        if (desired != "")
+        if (desired != "") {
             QueueDeferred(hwnd, "tidy", targetMon,,, 1400)
+            ; a window moved across monitors without activation keeps its
+            ; taskbar button on the old taskbar — gentle activation fixes it
+            if (gActivateOnMove && !wasOnTarget)
+                QueueDeferred(hwnd, "activate",,,, 350)
+        }
     }
 }
 
@@ -1210,6 +1223,17 @@ MaintainGroups() {
         alive.Push(grp)
     }
     gGroups := alive
+}
+
+ActivateForTaskbar(hwnd) {
+    if !DllCall("IsWindow", "ptr", hwnd)
+        return
+    if (WinGetMinMax(hwnd) = -1)
+        return
+    if WinActive(hwnd)
+        return
+    try WinActivate(hwnd)
+    Log("activated " hwnd " so its taskbar button follows the move")
 }
 
 SnapActiveWindow(hkName := "") {
