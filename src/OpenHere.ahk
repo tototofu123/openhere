@@ -37,6 +37,12 @@ SWP_NOACTIVATE := 0x0010
 SWP_NOOWNERZORDER := 0x0200
 SW_MAXIMIZE := 3
 
+; ---- autostart lives in the per-user Run key, not a Startup .lnk:
+; a .lnk pointing at a bare .ahk silently stops working if the AutoHotkey
+; file association is ever changed or AHK is reinstalled somewhere else.
+RUN_KEY := "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_NAME := "OpenHere"
+
 ; ---- windows that ARE the shell (taskbar, start, search,
 ; ---- action center, IME). Never managed, never moved.
 SHELL_CLASSES := [
@@ -56,6 +62,7 @@ gSeen := Map()          ; hwnd -> true (already handled)
 gRules := Map()         ; "notepad.exe" -> "cursor" | "never" | "monitor:N"
 gEnabled := true
 gPlacement := "center"
+gRunAtStartup := true
 gDebug := false
 gLogPath := ""
 gHookCallback := 0      ; keep referenced or the hook dies
@@ -97,6 +104,8 @@ placement=snap
 ; activate a window after moving it across monitors so its taskbar
 ; button follows (newly launched apps also come to the front)
 activate_on_move=1
+; launch automatically at Windows startup (per-user registry Run key)
+run_at_startup=1
 
 [debug]
 ; set to 1 to write a log of every decision next to this file
@@ -156,6 +165,7 @@ LoadConfig() {
     gGroupStyle := IniRead(path, "grouping", "mode", "overlap")
     gBarVisibility := IniRead(path, "grouping", "bar_visibility", "always")
     gActivateOnMove := IniRead(path, "general", "activate_on_move", "1") = "1"
+    gRunAtStartup := IniRead(path, "general", "run_at_startup", "1") = "1"
 
     gRules := Map()
     ; parse [rules] from the file directly: IniRead cannot return a
@@ -188,6 +198,38 @@ Log(text) {
     if !gDebug
         return
     try FileAppend(A_Now "  " text "`n", gLogPath)
+}
+
+; ------------------------------------------------------------
+; Autostart — per-user Run key. Rewritten on every launch, so moving
+; the folder or reinstalling AutoHotkey repairs the entry by itself.
+; The old Startup-folder .lnk is removed once and never recreated
+; (a .lnk aimed at a bare .ahk depends on a file association).
+; ------------------------------------------------------------
+StartupCommand() {
+    if A_IsCompiled
+        return '"' A_ScriptFullPath '"'
+    return '"' A_AhkPath '" "' A_ScriptFullPath '"'
+}
+
+ApplyRunAtStartup() {
+    global gRunAtStartup, RUN_KEY, RUN_NAME
+    legacy := A_Startup "\OpenHere.lnk"
+    if FileExist(legacy)
+        try FileDelete(legacy)
+    if gRunAtStartup
+        RegWrite(StartupCommand(), "REG_SZ", RUN_KEY, RUN_NAME)
+    else
+        RegDelete(RUN_KEY, RUN_NAME)
+}
+
+SetRunAtStartup(enabled) {
+    global gRunAtStartup
+    gRunAtStartup := enabled
+    IniWrite(enabled ? "1" : "0", ConfigPath(), "general", "run_at_startup")
+    ApplyRunAtStartup()
+    RefreshTray()
+    Log("run at startup " (enabled ? "enabled" : "disabled"))
 }
 
 ; ------------------------------------------------------------
@@ -772,6 +814,17 @@ PruneSeen() {
             gSeen.Delete(hwnd)
 }
 
+; A cold start has an empty gSeen. The WinEvent hook only reports windows
+; that show AFTER it is installed, but the sweep sees the whole existing
+; desktop — without priming it would treat every already-open window as
+; "new" and yank them all to the cursor (then snap them into cells).
+WarmupSeen() {
+    global gSeen
+    for hwnd in WinGetList()
+        gSeen[hwnd] := true
+    Log("warmup: marked " gSeen.Count " pre-existing windows as seen")
+}
+
 ; safety net: the WinEvent hook occasionally misses a window show on
 ; this machine — sweep every 700ms and handle anything unseen. gSeen
 ; makes both paths idempotent.
@@ -828,7 +881,7 @@ BuildTray() {
 }
 
 RefreshTray() {
-    global gEnabled, gPlacement
+    global gEnabled, gPlacement, gRunAtStartup
     if gEnabled
         A_TrayMenu.Check("Enabled`t(what makes windows follow you)")
     else
@@ -837,6 +890,10 @@ RefreshTray() {
         A_TrayMenu.Check("Snap into empty space")
     else
         A_TrayMenu.Uncheck("Snap into empty space")
+    if gRunAtStartup
+        A_TrayMenu.Check("Run at startup")
+    else
+        A_TrayMenu.Uncheck("Run at startup")
     UpdateTrayIcon()
     UpdateDesktopShortcutIcon()
 }
@@ -896,14 +953,8 @@ MenuToggleEnabled(*) {
 }
 
 MenuToggleStartup(*) {
-    lnk := A_Startup "\OpenHere.lnk"
-    if FileExist(lnk) {
-        FileDelete(lnk)
-        Log("startup shortcut removed")
-    } else {
-        FileCreateShortcut(A_ScriptFullPath, lnk, A_ScriptDir)
-        Log("startup shortcut created")
-    }
+    global gRunAtStartup
+    SetRunAtStartup(!gRunAtStartup)
 }
 
 MenuEditRules(*) {
@@ -927,10 +978,14 @@ MenuQuit(*) {
 ; Start
 ; ------------------------------------------------------------
 LoadConfig()
+try ApplyRunAtStartup()   ; self-heal the Run key (path/AHK may have moved)
+catch Error as err
+    Log("autostart registration failed: " err.Message)
 BuildTray()
 CoordMode "Mouse", "Screen"   ; v2 defaults to Client-relative — placement needs screen coords
 Persistent()   ; v2: tray-only scripts exit when startup ends unless marked persistent
 SetTimer(Watchdog, 400)   ; drains the deferred re-check / re-assert queue + group upkeep
+WarmupSeen()   ; never treat the windows you already had as "new" on launch
 SetTimer(SweepNewWindows, 700)   ; hook fallback: catch windows the hook missed
 RegisterHotkeys()
 OnMessage(0x404, OnTrayIconMsg)   ; tray icon left-click = toggle
@@ -960,7 +1015,7 @@ Log("OpenHere running; hook=" Hex(gHookHandle) " ini=" ConfigPath())
 ;  active member is the speaker.
 ; ============================================================
 
-#HotIf
+#HotIf gGroupMode
 ~LButton::GroupModeClick()
 Esc::GroupEsc()
 #HotIf

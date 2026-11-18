@@ -17,13 +17,13 @@ Built for the 3-monitor life where everything always opened on the wrong screen.
 1. Install [AutoHotkey v2](https://www.autohotkey.com/) once:
    `winget install AutoHotkey.AutoHotkey`
 2. Download `OpenHere.ahk` (or clone this repo) and double-click it. That's the whole install.
-3. Optional: right-click the tray icon → **Run at startup**.
+3. It registers itself to launch at Windows startup on first run (per-user Run key, no admin needed). To stop that, right-click the tray icon → **Run at startup** to untick it, or set `run_at_startup=0` in the ini.
 
-Requirements: Windows 10/11. No admin rights. Nothing is installed and no system setting is touched — deleting the file removes OpenHere entirely.
+Requirements: Windows 10/11. No admin rights. Nothing is installed; the only change outside the folder is an optional per-user Run key for autostart (untick **Run at startup** to remove it).
 
 ## What it does
 
-- **Follows the cursor** — a new app window lands on the monitor your mouse is on. Desktop-icon launches, Start-menu launches, pinned-taskbar launches, folder windows — all covered.
+- **Follows the cursor** — a new app window lands on the monitor your mouse is on. Desktop-icon launches, Start-menu launches, pinned-taskbar launches, folder windows — all covered. Windows that were already open before OpenHere started are left exactly where you had them; only genuinely new windows are moved.
 - **Snaps into empty space (v0.2)** — OpenHere knows what's already on the monitor and fills the next free slot instead of stacking on top of it:
 
 ```
@@ -72,7 +72,7 @@ Hotkeys are configurable in `[grouping]` of the ini (`^` = Ctrl, `!` = Alt, `+` 
 | Item | What it does |
 |---|---|
 | **Enabled** ✓ | Master switch. Unchecked = OpenHere does nothing at all; Windows behaves exactly stock. |
-| **Run at startup** | Creates/removes a shortcut in your Startup folder. |
+| **Run at startup** | Adds/removes the per-user Run-key entry that launches OpenHere with Windows (on by default). |
 | **Edit rules…** | Opens `openhere.ini` next to the script. |
 | **Reload rules** | Re-reads the config without restarting. |
 | **Quit** | Fully exits. |
@@ -83,6 +83,7 @@ Hotkeys are configurable in `[grouping]` of the ini (`^` = Ctrl, `!` = Alt, `+` 
 [general]
 enabled=1              ; the tray toggle writes here
 placement=snap         ; snap = fill the next free slot | center = always center
+run_at_startup=1       ; register a per-user Run key so OpenHere starts with Windows
 
 [rules]
 ; per-app rules win over the global behavior:
