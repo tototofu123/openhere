@@ -27,6 +27,9 @@ WINEVENT_SKIPOWNPROCESS := 0x0002
 MONITOR_DEFAULTTONEAREST := 2
 DWMWA_CLOAKED := 14
 DWMWA_EXTENDED_FRAME_BOUNDS := 9
+DWMWA_WINDOW_CORNER_PREFERENCE := 33
+DWMWCP_DEFAULT := 0
+DWMWCP_DONOTROUND := 1
 GA_ROOT := 2
 GW_OWNER := 4
 GWL_EXSTYLE := -20
@@ -302,6 +305,16 @@ VisibleRect(hwnd) {
         || Abs(vis.right - win.right) > 100 || Abs(vis.bottom - win.bottom) > 100)
         return win
     return vis
+}
+
+; Windows 11 rounds floating windows but keeps snapped/maximized ones
+; square. A SetWindowPos-placed window is still "floating" to DWM, so
+; tiled windows would show rounded inner corners (unlike native snap).
+; Mirror native snap by asking DWM not to round a window we tile.
+SetWindowCorners(hwnd, square) {
+    pref := square ? DWMWCP_DONOTROUND : DWMWCP_DEFAULT
+    DllCall("dwmapi\DwmSetWindowAttribute", "ptr", hwnd, "uint",
+            DWMWA_WINDOW_CORNER_PREFERENCE, "int*", &pref, "uint", 4, "int")
 }
 
 ; ------------------------------------------------------------
@@ -670,12 +683,12 @@ MoveToMonitor(hwnd, targetMon, isRetry := false) {
     y := wa.top + (waH - winH) // 2
     x := Max(x, wa.left)
     y := Max(y, wa.top)
-    SetWindowPosRect(hwnd, x, y, winW, winH)
+    SetWindowPosRect(hwnd, x, y, winW, winH, false)   ; centered, not tiled: keep native rounding
     Log("moved " hwnd " -> " x "," y " on monitor " Hex(targetMon))
     return {l: x, t: y, r: x + winW, b: y + winH}
 }
 
-SetWindowPosRect(hwnd, x, y, w, h) {
+SetWindowPosRect(hwnd, x, y, w, h, square := true) {
     ; (x,y,w,h) is the VISIBLE frame we want. Expand it by each app's
     ; invisible border so the visible edges land flush on the cell —
     ; otherwise adjacent tiles leave a thin gap of wallpaper between.
@@ -691,6 +704,7 @@ SetWindowPosRect(hwnd, x, y, w, h) {
     }
     DllCall("SetWindowPos", "ptr", hwnd, "ptr", 0, "int", x, "int", y,
             "int", w, "int", h, "uint", SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER, "int")
+    SetWindowCorners(hwnd, square)
 }
 
 Hex(v) => Format("0x{:X}", v)
