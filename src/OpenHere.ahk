@@ -26,6 +26,7 @@ WINEVENT_OUTOFCONTEXT := 0x0000
 WINEVENT_SKIPOWNPROCESS := 0x0002
 MONITOR_DEFAULTTONEAREST := 2
 DWMWA_CLOAKED := 14
+DWMWA_EXTENDED_FRAME_BOUNDS := 9
 GA_ROOT := 2
 GW_OWNER := 4
 GWL_EXSTYLE := -20
@@ -283,6 +284,26 @@ WindowRect(hwnd) {
     }
 }
 
+; The window rect includes Windows' invisible resize borders, so two
+; windows placed at adjacent cell edges visibly stop short of each other.
+; DWM's extended frame bounds are the rectangle you actually SEE — use
+; that for all placement decisions. Fall back to WindowRect when DWM has
+; no usable answer (minimized/island windows report nonsense bounds).
+VisibleRect(hwnd) {
+    win := WindowRect(hwnd)
+    fb := Buffer(16, 0)
+    if DllCall("dwmapi\DwmGetWindowAttribute", "ptr", hwnd, "uint",
+               DWMWA_EXTENDED_FRAME_BOUNDS, "ptr", fb, "uint", 16, "int") != 0
+        return win
+    vis := {left: NumGet(fb, 0, "Int"), top: NumGet(fb, 4, "Int"),
+            right: NumGet(fb, 8, "Int"), bottom: NumGet(fb, 12, "Int")}
+    if (vis.right <= vis.left || vis.bottom <= vis.top
+        || Abs(vis.left - win.left) > 100 || Abs(vis.top - win.top) > 100
+        || Abs(vis.right - win.right) > 100 || Abs(vis.bottom - win.bottom) > 100)
+        return win
+    return vis
+}
+
 ; ------------------------------------------------------------
 ; Decision filter — is this hwnd a real app window we manage?
 ; ------------------------------------------------------------
@@ -388,7 +409,7 @@ CollectOccupied(targetMon, excludeHwnd, wa) {
             continue
         if (MonitorFromHwnd(hwnd) != targetMon)
             continue
-        rc := WindowRect(hwnd)
+        rc := VisibleRect(hwnd)
         l := Max(rc.left, wa.left), t := Max(rc.top, wa.top)
         r := Min(rc.right, wa.right), b := Min(rc.bottom, wa.bottom)
         if (r - l < 40 || b - t < 40)
@@ -401,36 +422,43 @@ CollectOccupied(targetMon, excludeHwnd, wa) {
 }
 
 DetectGrid(occ, wa) {
-    ; the grid is implied by the COLUMN-SHAPED windows; other windows
-    ; (full-width apps, odd sizes) don't veto it — they still block
-    ; whichever cells they cover, so there is nowhere false to snap
+    ; A grid is implied by windows shaped like a fraction of the monitor.
+    ; Both columns AND rows matter: on a tall/narrow monitor apps are
+    ; snapped into full-width horizontal bands, and those used to be
+    ; ignored — so a 1/3 window had no grid for the next app to continue.
     waW := wa.right - wa.left
     waH := wa.bottom - wa.top
-    hasThird := false
-    hasHalf := false
-    shortHalf := false
+    hasThird := false, hasHalf := false, shortHalf := false
+    rowThird := false, rowHalf := false
     for w in occ {
         fw := (w.r - w.l) / waW
         fh := (w.b - w.t) / waH
-        if (fw < 0.26 || fw > 0.74)                ; not a column: implies no grid
-            continue
-        if (fw <= 0.45) {
-            ; A third-shaped window implies thirds regardless of its
-            ; height — a 1/3 window is often not full-height. Checking
-            ; height first used to send these into the 2x2 (quarter)
-            ; branch, so the next window landed in a 1/4 cell instead
-            ; of the next 1/3 slot.
-            hasThird := true
-        } else {
-            hasHalf := true
-            if (fh < 0.8)
-                shortHalf := true                  ; half-width + short = 2x2
+        if (fw > 0.20 && fw <= 0.80) {
+            ; column-shaped — width decides the grid, height only
+            ; distinguishes a 2x2 of quarters from full-height columns
+            if (fw <= 0.45)
+                hasThird := true
+            else {
+                hasHalf := true
+                if (fh < 0.8)
+                    shortHalf := true
+            }
+        } else if (fw > 0.80 && fh > 0.20 && fh <= 0.80) {
+            ; full-width horizontal band — stack them like rows
+            if (fh <= 0.45)
+                rowThird := true
+            else
+                rowHalf := true
         }
     }
     if (hasThird)
-        return "cols3"                             ; continue the 1/3 row
+        return "cols3"                             ; continue the 1/3 column
     if (hasHalf)
         return shortHalf ? "2x2" : "cols2"
+    if (rowThird)
+        return "rows3"                             ; continue the 1/3 row
+    if (rowHalf)
+        return "rows2"
     return ""
 }
 
@@ -438,10 +466,15 @@ GridCells(grid, wa) {
     l := wa.left, t := wa.top, r := wa.right, b := wa.bottom
     midX := l + (r - l) // 2, midY := t + (b - t) // 2
     x1 := l + (r - l) // 3, x2 := l + 2 * (r - l) // 3
+    y1 := t + (b - t) // 3, y2 := t + 2 * (b - t) // 3
     if (grid = "cols2")
         return [{l: l, t: t, r: midX, b: b}, {l: midX, t: t, r: r, b: b}]
     if (grid = "cols3")
         return [{l: l, t: t, r: x1, b: b}, {l: x1, t: t, r: x2, b: b}, {l: x2, t: t, r: r, b: b}]
+    if (grid = "rows2")
+        return [{l: l, t: t, r: r, b: midY}, {l: l, t: midY, r: r, b: b}]
+    if (grid = "rows3")
+        return [{l: l, t: t, r: r, b: y1}, {l: l, t: y1, r: r, b: y2}, {l: l, t: y2, r: r, b: b}]
     ; 2x2 — reading order: top-left, top-right, bottom-left, bottom-right
     return [{l: l, t: t, r: midX, b: midY}, {l: midX, t: t, r: r, b: midY},
             {l: l, t: midY, r: midX, b: b}, {l: midX, t: midY, r: r, b: b}]
@@ -536,7 +569,7 @@ MonitorProtected(mon, excludeHwnd) {
             continue
         if (MonitorFromHwnd(hwnd) != mon)
             continue
-        rc := WindowRect(hwnd)
+        rc := VisibleRect(hwnd)
         ol := Max(rc.left, l), ot := Max(rc.top, t)
         orr := Min(rc.right, r), ob := Min(rc.bottom, b)
         if (orr <= ol || ob <= ot)
@@ -561,7 +594,7 @@ MoveToMonitor(hwnd, targetMon, isRetry := false) {
     waH := wa.bottom - wa.top
 
     minmax := WinGetMinMax(hwnd)
-    rc := WindowRect(hwnd)
+    rc := VisibleRect(hwnd)
     winW := rc.right - rc.left
     winH := rc.bottom - rc.top
     hasCaption := (DllCall("GetWindowLongPtrW", "ptr", hwnd, "int", -16, "ptr") & WS_CAPTION) != 0
@@ -592,7 +625,7 @@ MoveToMonitor(hwnd, targetMon, isRetry := false) {
         if (gPlacement != "snap" || MonitorFromHwnd(hwnd) != targetMon) {
             ; keep it maximized, but on the target monitor
             WinRestore(hwnd)
-            rc := WindowRect(hwnd)
+            rc := VisibleRect(hwnd)
             winW := rc.right - rc.left
             winH := rc.bottom - rc.top
             x := wa.left + (waW - winW) // 2
@@ -643,6 +676,19 @@ MoveToMonitor(hwnd, targetMon, isRetry := false) {
 }
 
 SetWindowPosRect(hwnd, x, y, w, h) {
+    ; (x,y,w,h) is the VISIBLE frame we want. Expand it by each app's
+    ; invisible border so the visible edges land flush on the cell —
+    ; otherwise adjacent tiles leave a thin gap of wallpaper between.
+    win := WindowRect(hwnd)
+    vis := VisibleRect(hwnd)
+    winW := win.right - win.left, winH := win.bottom - win.top
+    visW := vis.right - vis.left, visH := vis.bottom - vis.top
+    if (winW > 0 && winH > 0 && visW > 0 && visH > 0) {
+        x -= vis.left - win.left
+        y -= vis.top - win.top
+        w += winW - visW
+        h += winH - visH
+    }
     DllCall("SetWindowPos", "ptr", hwnd, "ptr", 0, "int", x, "int", y,
             "int", w, "int", h, "uint", SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER, "int")
 }
@@ -710,7 +756,7 @@ Reassert(hwnd, targetMon, attempt, desired) {
         if (WinGetMinMax(hwnd) = 1 && MonitorFromHwnd(hwnd) = targetMon)
             return
     } else {
-        cur := WindowRect(hwnd)
+        cur := VisibleRect(hwnd)
         if (WinGetMinMax(hwnd) != 1
             && Abs(cur.left - desired.l) <= 8 && Abs(cur.top - desired.t) <= 8
             && Abs(cur.right - desired.r) <= 8 && Abs(cur.bottom - desired.b) <= 8)
@@ -728,7 +774,7 @@ Reassert(hwnd, targetMon, attempt, desired) {
     } else {
         wa := MonitorWorkArea(targetMon)
         WinRestore(hwnd)
-        rc := WindowRect(hwnd)
+        rc := VisibleRect(hwnd)
         x := wa.left + ((wa.right - wa.left) - (rc.right - rc.left)) // 2
         y := wa.top + ((wa.bottom - wa.top) - (rc.bottom - rc.top)) // 2
         SetWindowPosRect(hwnd, x, y, rc.right - rc.left, rc.bottom - rc.top)
@@ -1141,7 +1187,7 @@ AddOverlay(hwnd) {
     global gGroupOverlays
     g := Gui("-Caption +AlwaysOnTop +ToolWindow +E0x20 +E0x80000 +E0x08000000")
     g.BackColor := "00A0E9"
-    rc := WindowRect(hwnd)
+    rc := VisibleRect(hwnd)
     g.Show("x" (rc.left - 3) " y" (rc.top - 3) " w" (rc.right - rc.left + 6) " h" (rc.bottom - rc.top + 6) " NA")
     WinSetTransparent(110, g)
     gGroupOverlays[hwnd] := g
@@ -1168,7 +1214,7 @@ ConfirmGroup() {
     occ := CollectOccupied(mon, 0, wa)
     grid := occ.Length > 0 ? DetectGrid(occ, wa) : ""
     if (grid != "") {
-        rc := WindowRect(activeHwnd)
+        rc := VisibleRect(activeHwnd)
         cx := (rc.left + rc.right) / 2
         cy := (rc.top + rc.bottom) / 2
         for c in GridCells(grid, wa) {
@@ -1179,7 +1225,7 @@ ConfirmGroup() {
         }
     }
     if (cell = "") {
-        rc := WindowRect(activeHwnd)
+        rc := VisibleRect(activeHwnd)
         cell := {l: rc.left, t: rc.top, r: rc.right, b: rc.bottom}
     }
 

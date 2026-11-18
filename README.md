@@ -29,6 +29,8 @@ Requirements: Windows 10/11. No admin rights. Nothing is installed; the only cha
 ```
    window on the left half   ->  next window fills the right half
    window on the left third  ->  next window takes the middle third
+   window in the top 1/3      ->  next takes the middle 1/3 row (tall monitors)
+   window in the top half     ->  next window fills the bottom half
    window in the top-left 1/4 ->  next takes top-right, then bottom-left
    half + quarter occupied    ->  next fills the remaining quarter
    nothing on the monitor     ->  centered, keeping the app's own size
