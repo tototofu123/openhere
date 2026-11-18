@@ -406,27 +406,32 @@ DetectGrid(occ, wa) {
     ; whichever cells they cover, so there is nowhere false to snap
     waW := wa.right - wa.left
     waH := wa.bottom - wa.top
-    anyShort := false
-    foundColumn := false
-    widest := 0
+    hasThird := false
+    hasHalf := false
+    shortHalf := false
     for w in occ {
         fw := (w.r - w.l) / waW
         fh := (w.b - w.t) / waH
-        if (fw < 0.26 || fw > 0.74)
+        if (fw < 0.26 || fw > 0.74)                ; not a column: implies no grid
             continue
-        foundColumn := true
-        if (fh < 0.8)
-            anyShort := true
-        if (fw > widest)
-            widest := fw
+        if (fw <= 0.45) {
+            ; A third-shaped window implies thirds regardless of its
+            ; height — a 1/3 window is often not full-height. Checking
+            ; height first used to send these into the 2x2 (quarter)
+            ; branch, so the next window landed in a 1/4 cell instead
+            ; of the next 1/3 slot.
+            hasThird := true
+        } else {
+            hasHalf := true
+            if (fh < 0.8)
+                shortHalf := true                  ; half-width + short = 2x2
+        }
     }
-    if !foundColumn
-        return ""
-    if (anyShort)
-        return "2x2"                               ; quarter-shaped window present
-    if (widest <= 0.45)
-        return "cols3"                             ; third-shaped windows
-    return "cols2"                                 ; half-shaped windows
+    if (hasThird)
+        return "cols3"                             ; continue the 1/3 row
+    if (hasHalf)
+        return shortHalf ? "2x2" : "cols2"
+    return ""
 }
 
 GridCells(grid, wa) {
