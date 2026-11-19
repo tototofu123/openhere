@@ -24,19 +24,19 @@ Requirements: Windows 10/11. No admin rights. Nothing is installed; the only cha
 ## What it does
 
 - **Follows the cursor** — a new app window lands on the monitor your mouse is on. Desktop-icon launches, Start-menu launches, pinned-taskbar launches, folder windows — all covered. Windows that were already open before OpenHere started are left exactly where you had them; only genuinely new windows are moved.
-- **Snaps into empty space (v0.2)** — OpenHere knows what's already on the monitor and fills the next free slot instead of stacking on top of it:
+- **Ratio-based multi-monitor tiling** — OpenHere knows what's already on the monitor under your cursor and fills the next free slot instead of stacking. Cells are fractions of that monitor's work area (halves, thirds, quarters), and the fill order follows the monitor's aspect ratio:
 
 ```
-   window on the left half   ->  next window fills the right half
-   window on the left third  ->  next window takes the middle third
-   window in the top 1/3      ->  next takes the middle 1/3 row (tall monitors)
-   window in the top half     ->  next window fills the bottom half
-   window in the top-left 1/4 ->  next takes top-right, then bottom-left
-   half + quarter occupied    ->  next fills the remaining quarter
-   nothing on the monitor     ->  centered, keeping the app's own size
+   horizontal / landscape monitor -> 1 TL, 2 BL, 3 TR, 4 BR (down each column first)
+   vertical / portrait monitor    -> 1 TL, 2 TR, 3 BL, 4 BR (across each row first)
+
+   one window on the left half     -> next fills the right half
+   one window on the left third    -> next fills the middle third, then the right third
+   one window in the top 1/3       -> next takes the middle 1/3 row, then the bottom
+   monitor is empty                -> start at TL of a default 2x2 grid
 ```
 
-  The grid is detected from the shape of existing windows (work area only — the taskbar is excluded), and per-app rules still win. A window that opens maximized is snapped into the free cell too; a genuinely full or ungridded screen falls back to plain centering. Toggle it any time: tray → **Snap into empty space**, or `placement=snap|center` in the ini.
+  The grid is derived from the *ratio* of existing windows (work area only — taskbar excluded); an empty monitor starts with a default 2×2 grid. The target monitor is always the one your **cursor is on** (or a `monitor:N` rule). Per-app rules still win. A maximized newborn is snapped into a free cell too. Toggle tiling any time: tray → **Snap into empty space**, or `placement=snap|center` in the ini.
 - **Preserves state** — maximized windows re-maximize on the target monitor; fullscreen borderless windows are moved whole; owned dialogs (Save As…) keep following their parent app.
 - **Fights back gracefully** — apps that restore their own saved geometry on startup (browsers, Office) get re-asserted a few times, then OpenHere concedes and you can pin them with a rule.
 - **Respects the shell** — taskbar, Start, search, Action Center, IME and XAML content-island ghosts are never touched.

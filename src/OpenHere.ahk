@@ -381,15 +381,118 @@ IsManageableWindow(hwnd, isRetry := false, &transientRej := false, fromHook := f
 }
 
 ; ------------------------------------------------------------
-; Snap into empty space — know what's already on the monitor and
-; fill the next free slot instead of stacking on top of it.
+; Ratio-based tiling across every monitor.
 ;
-;   one window on the left half  -> next fills the right half
-;   one window on the left third -> next fills the middle third
-;   window in the top-left 1/4   -> next top-right, then bottom-left
-;   half + quarter occupied      -> next fills the remaining quarter
-;   anything else                -> center, like before
+; A grid is described by column/row boundaries expressed as FRACTIONS
+; of the cursor monitor's work area — nothing is hard-coded in pixels.
+; Existing windows tell us the fractions (half / third / quarter);
+; an empty monitor starts from a default 2x2 grid.
+;
+; Fill order is decided by the monitor's aspect ratio (the viewport
+; under the cursor):
+;   horizontal / landscape -> column-major: TL, BL, TR, BR
+;   vertical / portrait    -> row-major:    TL, TR, BL, BR
 ; ------------------------------------------------------------
+SnapFrac(v) {
+    ; nearest "nice" fraction, or -1 when v isn't close to one
+    static fracs := [0.0, 0.25, 1/3, 0.5, 2/3, 0.75, 1.0]
+    best := -1, bestD := 0.045
+    for f in fracs {
+        d := Abs(v - f)
+        if (d < bestD) {
+            bestD := d
+            best := f
+        }
+    }
+    return best
+}
+
+AxisBoundaries(vals) {
+    ; promote a detected fraction to a full, even grid on that axis
+    third := false, quarter := false, half := false
+    for v in vals {
+        if (Abs(v - 1/3) < 0.01 || Abs(v - 2/3) < 0.01)
+            third := true
+        else if (Abs(v - 0.25) < 0.01 || Abs(v - 0.75) < 0.01)
+            quarter := true
+        else if (Abs(v - 0.5) < 0.01)
+            half := true
+    }
+    if (third)
+        return [0, 1/3, 2/3, 1]
+    if (quarter)
+        return [0, 0.25, 0.5, 0.75, 1]
+    if (half)
+        return [0, 0.5, 1]
+    return [0, 1]
+}
+
+DefaultGrid() {
+    return {cols: [0, 0.5, 1], rows: [0, 0.5, 1]}
+}
+
+DetectGrid(occ, wa) {
+    waW := wa.right - wa.left, waH := wa.bottom - wa.top
+    if (waW <= 0 || waH <= 0)
+        return ""
+    if (occ.Length = 0)
+        return DefaultGrid()
+    xs := [], ys := []
+    for w in occ {
+        lf := SnapFrac((w.l - wa.left) / waW), rf := SnapFrac((w.r - wa.left) / waW)
+        tf := SnapFrac((w.t - wa.top) / waH),  bf := SnapFrac((w.b - wa.top) / waH)
+        if (lf < 0 || rf < 0 || tf < 0 || bf < 0 || rf <= lf || bf <= tf)
+            continue
+        fw := rf - lf, fh := bf - tf
+        if (fh >= 0.75) {                       ; full-height window -> column boundaries
+            xs.Push(lf), xs.Push(rf)
+        }
+        if (fw >= 0.75) {                       ; full-width window -> row boundaries
+            ys.Push(tf), ys.Push(bf)
+        }
+        if (fw < 0.75 && fh < 0.75) {           ; quarter-ish -> both boundaries
+            xs.Push(lf), xs.Push(rf)
+            ys.Push(tf), ys.Push(bf)
+        }
+    }
+    cols := AxisBoundaries(xs), rows := AxisBoundaries(ys)
+    if (cols.Length = 2 && rows.Length = 2)    ; nothing to divide -> default grid
+        return DefaultGrid()
+    return {cols: cols, rows: rows}
+}
+
+GridCells(grid, wa) {
+    ; landscape fills down each column first (TL, BL, TR, BR);
+    ; portrait fills across each row first (TL, TR, BL, BR).
+    waW := wa.right - wa.left, waH := wa.bottom - wa.top
+    landscape := (waW >= waH)
+    cols := grid.cols, rows := grid.rows
+    nCol := cols.Length - 1, nRow := rows.Length - 1
+    cells := []
+    addCell(c, r) => cells.Push({l: wa.left + Round(cols[c] * waW),
+                                 t: wa.top  + Round(rows[r] * waH),
+                                 r: wa.left + Round(cols[c + 1] * waW),
+                                 b: wa.top  + Round(rows[r + 1] * waH)})
+    if (landscape) {
+        Loop nCol {
+            c := A_Index
+            Loop nRow
+                addCell(c, A_Index)
+        }
+    } else {
+        Loop nRow {
+            r := A_Index
+            Loop nCol
+                addCell(A_Index, r)
+        }
+    }
+    return cells
+}
+
+GridName(grid) {
+    return IsObject(grid) ? (grid.cols.Length - 1) "x" (grid.rows.Length - 1) : "none"
+}
+
 CollectOccupied(targetMon, excludeHwnd, wa) {
     occ := []
     waW := wa.right - wa.left
@@ -434,65 +537,6 @@ CollectOccupied(targetMon, excludeHwnd, wa) {
     return occ
 }
 
-DetectGrid(occ, wa) {
-    ; A grid is implied by windows shaped like a fraction of the monitor.
-    ; Both columns AND rows matter: on a tall/narrow monitor apps are
-    ; snapped into full-width horizontal bands, and those used to be
-    ; ignored — so a 1/3 window had no grid for the next app to continue.
-    waW := wa.right - wa.left
-    waH := wa.bottom - wa.top
-    hasThird := false, hasHalf := false, shortHalf := false
-    rowThird := false, rowHalf := false
-    for w in occ {
-        fw := (w.r - w.l) / waW
-        fh := (w.b - w.t) / waH
-        if (fw > 0.20 && fw <= 0.80) {
-            ; column-shaped — width decides the grid, height only
-            ; distinguishes a 2x2 of quarters from full-height columns
-            if (fw <= 0.45)
-                hasThird := true
-            else {
-                hasHalf := true
-                if (fh < 0.8)
-                    shortHalf := true
-            }
-        } else if (fw > 0.80 && fh > 0.20 && fh <= 0.80) {
-            ; full-width horizontal band — stack them like rows
-            if (fh <= 0.45)
-                rowThird := true
-            else
-                rowHalf := true
-        }
-    }
-    if (hasThird)
-        return "cols3"                             ; continue the 1/3 column
-    if (hasHalf)
-        return shortHalf ? "2x2" : "cols2"
-    if (rowThird)
-        return "rows3"                             ; continue the 1/3 row
-    if (rowHalf)
-        return "rows2"
-    return ""
-}
-
-GridCells(grid, wa) {
-    l := wa.left, t := wa.top, r := wa.right, b := wa.bottom
-    midX := l + (r - l) // 2, midY := t + (b - t) // 2
-    x1 := l + (r - l) // 3, x2 := l + 2 * (r - l) // 3
-    y1 := t + (b - t) // 3, y2 := t + 2 * (b - t) // 3
-    if (grid = "cols2")
-        return [{l: l, t: t, r: midX, b: b}, {l: midX, t: t, r: r, b: b}]
-    if (grid = "cols3")
-        return [{l: l, t: t, r: x1, b: b}, {l: x1, t: t, r: x2, b: b}, {l: x2, t: t, r: r, b: b}]
-    if (grid = "rows2")
-        return [{l: l, t: t, r: r, b: midY}, {l: l, t: midY, r: r, b: b}]
-    if (grid = "rows3")
-        return [{l: l, t: t, r: r, b: y1}, {l: l, t: y1, r: r, b: y2}, {l: l, t: y2, r: r, b: b}]
-    ; 2x2 — reading order: top-left, top-right, bottom-left, bottom-right
-    return [{l: l, t: t, r: midX, b: midY}, {l: midX, t: t, r: r, b: midY},
-            {l: l, t: midY, r: midX, b: b}, {l: midX, t: midY, r: r, b: b}]
-}
-
 CellOccupied(cell, occ) {
     cellArea := (cell.r - cell.l) * (cell.b - cell.t)
     for w in occ {
@@ -535,7 +579,7 @@ TidyGrid(targetMon) {
                 && Abs(w.r - cell.r) <= 3 && Abs(w.b - cell.b) <= 3)
                 continue
             SetWindowPosRect(w.hwnd, cell.l, cell.t, cellW, cellH)
-            Log("tidied " w.hwnd " flush into " grid " cell")
+            Log("tidied " w.hwnd " flush into " GridName(grid) " cell")
         }
     }
 }
@@ -622,15 +666,15 @@ MoveToMonitor(hwnd, targetMon, isRetry := false) {
     if (minmax = 1) {
         ; maximized birth state
         occ := CollectOccupied(targetMon, hwnd, wa)
-        grid := occ.Length > 0 ? DetectGrid(occ, wa) : ""
+        grid := DetectGrid(occ, wa)
         if (gPlacement = "snap")
-            Log("maximized newborn " hwnd ": occ=" occ.Length " grid=" (grid = "" ? "none" : grid))
+            Log("maximized newborn " hwnd ": occ=" occ.Length " grid=" GridName(grid))
         if (gPlacement = "snap" && grid != "") {
             for cell in GridCells(grid, wa) {
                 if !CellOccupied(cell, occ) {
                     WinRestore(hwnd)
                     SetWindowPosRect(hwnd, cell.l, cell.t, cell.r - cell.l, cell.b - cell.t)
-                    Log("snapped maximized " hwnd " into " grid " free cell")
+                    Log("snapped maximized " hwnd " into " GridName(grid) " free cell")
                     return {l: cell.l, t: cell.t, r: cell.r, b: cell.b}
                 }
             }
@@ -664,14 +708,14 @@ MoveToMonitor(hwnd, targetMon, isRetry := false) {
     ; snap: fill the next free slot if the monitor knows its layout
     if (gPlacement = "snap") {
         occ := CollectOccupied(targetMon, hwnd, wa)
-        grid := occ.Length > 0 ? DetectGrid(occ, wa) : ""
-        if (occ.Length > 0)
-            Log("snap check " hwnd ": occ=" occ.Length " grid=" (grid = "" ? "none" : grid))
+        grid := DetectGrid(occ, wa)
+        Log("snap check " hwnd ": occ=" occ.Length " grid=" GridName(grid)
+            " viewport=" (wa.right - wa.left >= wa.bottom - wa.top ? "horizontal" : "vertical"))
         if (grid != "") {
             for cell in GridCells(grid, wa) {
                 if !CellOccupied(cell, occ) {
                     SetWindowPosRect(hwnd, cell.l, cell.t, cell.r - cell.l, cell.b - cell.t)
-                    Log("snapped " hwnd " into " grid " free cell")
+                    Log("snapped " hwnd " into " GridName(grid) " free cell")
                     return {l: cell.l, t: cell.t, r: cell.r, b: cell.b}
                 }
             }
@@ -1226,7 +1270,7 @@ ConfirmGroup() {
     ; grid, the group stacks where the speaker is right now
     cell := ""
     occ := CollectOccupied(mon, 0, wa)
-    grid := occ.Length > 0 ? DetectGrid(occ, wa) : ""
+    grid := DetectGrid(occ, wa)
     if (grid != "") {
         rc := VisibleRect(activeHwnd)
         cx := (rc.left + rc.right) / 2
@@ -1417,7 +1461,7 @@ SnapActiveWindow(hkName := "") {
     }
     wa := MonitorWorkArea(mon)
     occ := CollectOccupied(mon, hwnd, wa)
-    grid := occ.Length > 0 ? DetectGrid(occ, wa) : ""
+    grid := DetectGrid(occ, wa)
     if (grid != "") {
         for cell in GridCells(grid, wa) {
             if !CellOccupied(cell, occ) {
