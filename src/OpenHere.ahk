@@ -1464,8 +1464,8 @@ ActivateForTaskbar(hwnd) {
         return
     if (WinGetMinMax(hwnd) = -1)
         return
-    if WinActive(hwnd)
-        return
+    ; Even an already-active window can keep a stale taskbar button when it was
+    ; moved across monitors with SWP_NOACTIVATE — so re-foreground it anyway.
     ; Windows pins a taskbar button to the monitor where the window was last
     ; foreground. SetWindowPos + SWP_NOACTIVATE does NOT move that button, so
     ; foreground the window here. WinActivate alone is frequently refused
