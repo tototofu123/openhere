@@ -59,11 +59,12 @@ Two more hotkeys:
 
 ### Protected monitors (v0.4)
 
-New windows are never snapped onto a monitor that is already fully occupied:
+A monitor already fully occupied is **not tiled over**:
 
 - a **fullscreen or maximized** window covering ~95%+ of the monitor protects it;
 - a **media player** (VLC, mpv, Media Player, Spotify…) covering 70%+ of a monitor protects it — your video never gets buried;
-- if **every** monitor is protected, new windows are simply left where Windows puts them.
+
+A new window on a protected monitor is still placed on **the monitor under your cursor**, at its own size, so it never disappears onto a different screen. It just isn't snapped into a grid cell or force-reasserted.
 
 Extra media process names can be added under `[media]` in the ini. Browsers playing windowed video can't be detected (no reliable signal) — fullscreen video in a browser is covered by the fullscreen rule.
 

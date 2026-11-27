@@ -898,7 +898,24 @@ HandleWindow(hwnd, isRetry := false, fromHook := false, retryAttempt := 0) {
         return
 
     if MonitorProtected(targetMon, hwnd) {
-        Log("target monitor protected (fullscreen/media) — " hwnd " left alone")
+        ; A fullscreen game/video must not be covered by a snapped app — but
+        ; leaving the window completely alone lets Windows open it on ANY
+        ; monitor, so the user loses track of it. Land it on the cursor's
+        ; monitor at its own size instead: right viewport, no tiling, no
+        ; re-assert fighting the protected window.
+        Log("target monitor protected — moving " hwnd " to viewport " Hex(targetMon) " without tiling")
+        wa := MonitorWorkArea(targetMon)
+        waW := wa.right - wa.left, waH := wa.bottom - wa.top
+        wasMax := (WinGetMinMax(hwnd) = 1)
+        if wasMax
+            WinRestore(hwnd)
+        rc := VisibleRect(hwnd)
+        winW := rc.right - rc.left, winH := rc.bottom - rc.top
+        x := wa.left + (waW - winW) // 2
+        y := wa.top + (waH - winH) // 2
+        SetWindowPosRect(hwnd, x, y, winW, winH, false)
+        if wasMax
+            DllCall("ShowWindow", "ptr", hwnd, "int", SW_MAXIMIZE, "int")
         return
     }
     Log("new window " hwnd " (" proc " / " WinGetClass(hwnd) ") rule=" rule)
