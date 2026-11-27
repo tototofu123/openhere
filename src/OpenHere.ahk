@@ -916,6 +916,12 @@ HandleWindow(hwnd, isRetry := false, fromHook := false, retryAttempt := 0) {
         SetWindowPosRect(hwnd, x, y, winW, winH, false)
         if wasMax
             DllCall("ShowWindow", "ptr", hwnd, "int", SW_MAXIMIZE, "int")
+        ; Without foregrounding, Windows leaves the taskbar button on the
+        ; monitor the window was created on — exactly the "wrong taskbar"
+        ; symptom. This path used to return before reaching the normal
+        ; activation below.
+        if gActivateOnMove
+            QueueDeferred(hwnd, "activate",,,, 350)
         return
     }
     Log("new window " hwnd " (" proc " / " WinGetClass(hwnd) ") rule=" rule)
@@ -1460,7 +1466,24 @@ ActivateForTaskbar(hwnd) {
         return
     if WinActive(hwnd)
         return
+    ; Windows pins a taskbar button to the monitor where the window was last
+    ; foreground. SetWindowPos + SWP_NOACTIVATE does NOT move that button, so
+    ; foreground the window here. WinActivate alone is frequently refused
+    ; while a fullscreen game holds foreground — attach to the foreground
+    ; thread first so SetForegroundWindow is accepted, then nudge with the
+    ; documented BringWindowToTop (and the classic SwitchToThisWindow when
+    ; available). Do NOT restore here: that would un-maximize the window.
+    fg := DllCall("GetForegroundWindow", "ptr")
+    fgTid := DllCall("GetWindowThreadProcessId", "ptr", fg, "ptr", 0, "uint")
+    myTid := DllCall("GetCurrentThreadId", "uint")
+    attached := false
+    if (fgTid && fgTid != myTid)
+        attached := DllCall("AttachThreadInput", "uint", myTid, "uint", fgTid, "int", true, "int")
     try WinActivate(hwnd)
+    try DllCall("BringWindowToTop", "ptr", hwnd)
+    try DllCall("SwitchToThisWindow", "ptr", hwnd, "int", true)
+    if attached
+        DllCall("AttachThreadInput", "uint", myTid, "uint", fgTid, "int", false, "int")
     Log("activated " hwnd " so its taskbar button follows the move")
 }
 
