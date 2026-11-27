@@ -84,6 +84,7 @@ gActivateOnMove := true
 gMediaProcs := Map()
 gSnapHotkey := "^!s"
 gTidyHotkey := "^!t"
+gTaskbarHotkey := "^!b"
 gGroupStyle := "overlap" 
 gHookHandle := 0
 
@@ -166,6 +167,7 @@ LoadConfig() {
         gMediaProcs[mp] := true
     gSnapHotkey := IniRead(path, "grouping", "snap_hotkey", "^!s")
     gTidyHotkey := IniRead(path, "grouping", "tidy_hotkey", "^!t")
+    gTaskbarHotkey := IniRead(path, "grouping", "taskbar_hotkey", "^!b")
     gGroupStyle := IniRead(path, "grouping", "mode", "overlap")
     gBarVisibility := IniRead(path, "grouping", "bar_visibility", "always")
     gActivateOnMove := IniRead(path, "general", "activate_on_move", "1") = "1"
@@ -897,6 +899,7 @@ HandleWindow(hwnd, isRetry := false, fromHook := false, retryAttempt := 0) {
     if (MonitorFromHwnd(hwnd) = targetMon && gPlacement != "snap")
         return
 
+    wasOnTarget := (MonitorFromHwnd(hwnd) = targetMon)
     if MonitorProtected(targetMon, hwnd) {
         ; A fullscreen game/video must not be covered by a snapped app — but
         ; leaving the window completely alone lets Windows open it on ANY
@@ -920,12 +923,11 @@ HandleWindow(hwnd, isRetry := false, fromHook := false, retryAttempt := 0) {
         ; monitor the window was created on — exactly the "wrong taskbar"
         ; symptom. This path used to return before reaching the normal
         ; activation below.
-        if gActivateOnMove
+        if gActivateOnMove && !wasOnTarget
             QueueDeferred(hwnd, "activate",,,, 350)
         return
     }
     Log("new window " hwnd " (" proc " / " WinGetClass(hwnd) ") rule=" rule)
-    wasOnTarget := (MonitorFromHwnd(hwnd) = targetMon)
     desired := MoveToMonitor(hwnd, targetMon, isRetry)
     if (desired != "none") {
         ScheduleReassert(hwnd, targetMon, 6, desired)
@@ -1003,6 +1005,7 @@ BuildTray() {
     A_TrayMenu.Add("Group windows`t" gGroupHotkey, (*) => GroupHotkey())
     A_TrayMenu.Add("Snap active window`t" gSnapHotkey, (*) => SnapActiveWindow())
     A_TrayMenu.Add("Tidy this monitor`t" gTidyHotkey, (*) => TidyNow())
+    A_TrayMenu.Add("Fix active taskbar button`t" gTaskbarHotkey, (*) => RefreshActiveTaskbar())
     A_TrayMenu.Add("Edit rules...", MenuEditRules)
     A_TrayMenu.Add("Reload rules", MenuReloadRules)
     A_TrayMenu.Add()
@@ -1181,13 +1184,18 @@ RegisterHotkeys(attempt := 5) {
         ok := false
         Log("hotkey '" gEnabledHotkey "' not registered: " err.Message)
     }
+    try Hotkey(gTaskbarHotkey, RefreshActiveTaskbar)
+    catch Error as err {
+        ok := false
+        Log("hotkey '" gTaskbarHotkey "' not registered: " err.Message)
+    }
     if (!ok && attempt > 0) {
         ; a just-killed previous instance can still hold the hotkeys
         ; for a moment — retry through the watchdog
         gPending.Push({hwnd: 0, kind: "hotkeys", at: A_TickCount, delay: 1000,
                        mon: 0, attempt: attempt - 1, desired: ""})
     }
-    Log("hotkeys ready (ok=" (ok ? "1" : "0") ", attempt " (6 - attempt) "/5): group=" gGroupHotkey " snap=" gSnapHotkey " tidy=" gTidyHotkey)
+    Log("hotkeys ready (ok=" (ok ? "1" : "0") ", attempt " (6 - attempt) "/5): group=" gGroupHotkey " snap=" gSnapHotkey " tidy=" gTidyHotkey " taskbar=" gTaskbarHotkey)
 }
 
 GroupHotkey(hkName := "") {
@@ -1484,7 +1492,25 @@ ActivateForTaskbar(hwnd) {
     try DllCall("SwitchToThisWindow", "ptr", hwnd, "int", true)
     if attached
         DllCall("AttachThreadInput", "uint", myTid, "uint", fgTid, "int", false, "int")
-    Log("activated " hwnd " so its taskbar button follows the move")
+
+    ; Foregrounding alone is not enough on Windows 11: the taskbar keeps the
+    ; button on the monitor where the window was first shown. A quick
+    ; minimize/restore forces it to re-register on the window's CURRENT
+    ; monitor. SW_RESTORE preserves maximized state when it was maximized.
+    wasMax := (WinGetMinMax(hwnd) = 1)
+    DllCall("ShowWindow", "ptr", hwnd, "int", 6)   ; SW_MINIMIZE
+    Sleep 80
+    DllCall("ShowWindow", "ptr", hwnd, "int", wasMax ? SW_MAXIMIZE : 9)  ; SW_RESTORE
+    Log("refreshed taskbar button for " hwnd " on " Hex(MonitorFromHwnd(hwnd)))
+}
+
+; Manual fix for any window whose button is still on the wrong taskbar.
+RefreshActiveTaskbar(*) {
+    hwnd := WinExist("A")
+    if !hwnd
+        return
+    ActivateForTaskbar(hwnd)
+    Log("manual taskbar refresh for " hwnd)
 }
 
 SnapActiveWindow(hkName := "") {
