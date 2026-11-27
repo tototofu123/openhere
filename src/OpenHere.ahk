@@ -1496,24 +1496,63 @@ ActivateForTaskbar(hwnd) {
     if attached
         DllCall("AttachThreadInput", "uint", myTid, "uint", fgTid, "int", false, "int")
 
-    ; The taskbar pins a button to the monitor where the window was first
-    ; shown. Minimizing is not enough — hide and re-add the button by briefly
-    ; toggling WS_EX_TOOLWINDOW. Windows then recreates it on the monitor the
-    ; window is CURRENTLY on. SWP_FRAMECHANGED applies the style change.
-    ex := DllCall("GetWindowLongPtrW", "ptr", hwnd, "int", GWL_EXSTYLE, "ptr")
-    if !(ex & WS_EX_TOOLWINDOW) {
-        flags := SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED
-        DllCall("SetWindowLongPtrW", "ptr", hwnd, "int", GWL_EXSTYLE,
-                "ptr", ex | WS_EX_TOOLWINDOW, "ptr")
-        DllCall("SetWindowPos", "ptr", hwnd, "ptr", 0, "int", 0, "int", 0,
-                "int", 0, "int", 0, "uint", flags, "int")
-        Sleep 100
-        DllCall("SetWindowLongPtrW", "ptr", hwnd, "int", GWL_EXSTYLE,
-                "ptr", ex & ~WS_EX_TOOLWINDOW, "ptr")
-        DllCall("SetWindowPos", "ptr", hwnd, "ptr", 0, "int", 0, "int", 0,
-                "int", 0, "int", 0, "uint", flags, "int")
-    }
+    ; SetWindowPos does NOT move a taskbar button. Windows' own Win+Shift+arrow
+    ; monitor move does (it goes through the window manager). Round-trip the
+    ; window to a neighbour monitor and back, then restore the exact geometry —
+    ; the button ends up on the monitor the window is really on.
+    NativeTaskbarRoundTrip(hwnd)
     Log("refreshed taskbar button for " hwnd " on " Hex(MonitorFromHwnd(hwnd)))
+}
+
+; Move the active window to a neighbour monitor and back so Windows registers
+; its taskbar button on the current monitor. Geometry is restored afterwards.
+NativeTaskbarRoundTrip(hwnd) {
+    mon := MonitorFromHwnd(hwnd)
+    wa := MonitorWorkArea(mon)
+    dir := ""
+    Loop MonitorGetCount() {
+        MonitorGetWorkArea(A_Index, &l, &t, &r, &b)
+        if (l = wa.left && t = wa.top && r = wa.right && b = wa.bottom)
+            continue
+        if (r <= wa.left && dir = "") {
+            dir := "Left"
+            continue
+        }
+        if (l >= wa.right && (dir = "" || dir = "Left"))
+            dir := "Right"
+        if (b <= wa.top && dir = "")
+            dir := "Up"
+        if (t >= wa.bottom && dir = "")
+            dir := "Down"
+    }
+    if (dir = "")
+        return
+    back := (dir = "Left") ? "Right" : (dir = "Right") ? "Left"
+          : (dir = "Up") ? "Down" : "Up"
+
+    rc := VisibleRect(hwnd)
+    x := rc.left, y := rc.top, w := rc.right - rc.left, h := rc.bottom - rc.top
+    wasMax := (WinGetMinMax(hwnd) = 1)
+    WinActivate(hwnd)
+    Sleep 120
+    Send "#+{" dir "}"
+    Sleep 420
+    Send "#+{" back "}"
+    Sleep 420
+    ; snap may have resized/repositioned it — put it back exactly
+    if !DllCall("IsWindow", "ptr", hwnd)
+        return
+    if (MonitorFromHwnd(hwnd) != mon) {
+        ; the round-trip landed somewhere unexpected — undo with a plain move
+        SetWindowPosRect(hwnd, x, y, w, h, false)
+        return
+    }
+    if wasMax {
+        SetWindowPosRect(hwnd, x, y, w, h)
+        DllCall("ShowWindow", "ptr", hwnd, "int", SW_MAXIMIZE, "int")
+    } else {
+        SetWindowPosRect(hwnd, x, y, w, h, false)
+    }
 }
 
 ; Manual fix for any window whose button is still on the wrong taskbar.
