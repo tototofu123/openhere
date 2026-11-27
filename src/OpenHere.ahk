@@ -37,6 +37,9 @@ WS_CAPTION := 0x00C00000
 WS_EX_TOOLWINDOW := 0x00000080
 WS_EX_NOACTIVATE := 0x08000000
 SWP_NOZORDER := 0x0004
+SWP_NOSIZE := 0x0001
+SWP_NOMOVE := 0x0002
+SWP_FRAMECHANGED := 0x0020
 SWP_NOACTIVATE := 0x0010
 SWP_NOOWNERZORDER := 0x0200
 SW_MAXIMIZE := 3
@@ -1493,14 +1496,23 @@ ActivateForTaskbar(hwnd) {
     if attached
         DllCall("AttachThreadInput", "uint", myTid, "uint", fgTid, "int", false, "int")
 
-    ; Foregrounding alone is not enough on Windows 11: the taskbar keeps the
-    ; button on the monitor where the window was first shown. A quick
-    ; minimize/restore forces it to re-register on the window's CURRENT
-    ; monitor. SW_RESTORE preserves maximized state when it was maximized.
-    wasMax := (WinGetMinMax(hwnd) = 1)
-    DllCall("ShowWindow", "ptr", hwnd, "int", 6)   ; SW_MINIMIZE
-    Sleep 80
-    DllCall("ShowWindow", "ptr", hwnd, "int", wasMax ? SW_MAXIMIZE : 9)  ; SW_RESTORE
+    ; The taskbar pins a button to the monitor where the window was first
+    ; shown. Minimizing is not enough — hide and re-add the button by briefly
+    ; toggling WS_EX_TOOLWINDOW. Windows then recreates it on the monitor the
+    ; window is CURRENTLY on. SWP_FRAMECHANGED applies the style change.
+    ex := DllCall("GetWindowLongPtrW", "ptr", hwnd, "int", GWL_EXSTYLE, "ptr")
+    if !(ex & WS_EX_TOOLWINDOW) {
+        flags := SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+        DllCall("SetWindowLongPtrW", "ptr", hwnd, "int", GWL_EXSTYLE,
+                "ptr", ex | WS_EX_TOOLWINDOW, "ptr")
+        DllCall("SetWindowPos", "ptr", hwnd, "ptr", 0, "int", 0, "int", 0,
+                "int", 0, "int", 0, "uint", flags, "int")
+        Sleep 100
+        DllCall("SetWindowLongPtrW", "ptr", hwnd, "int", GWL_EXSTYLE,
+                "ptr", ex & ~WS_EX_TOOLWINDOW, "ptr")
+        DllCall("SetWindowPos", "ptr", hwnd, "ptr", 0, "int", 0, "int", 0,
+                "int", 0, "int", 0, "uint", flags, "int")
+    }
     Log("refreshed taskbar button for " hwnd " on " Hex(MonitorFromHwnd(hwnd)))
 }
 
